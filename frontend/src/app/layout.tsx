@@ -18,6 +18,20 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const clerkKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  const isClerkConfigured = clerkKey && clerkKey !== "pk_test_placeholder" && !clerkKey.includes("placeholder");
+
+  if (!isClerkConfigured) {
+    return (
+      <html
+        lang="en"
+        className={`dark ${inter.variable} h-full antialiased`}
+      >
+        <body className="min-h-full flex flex-col">{children}</body>
+      </html>
+    );
+  }
+
   return (
     <ClerkProvider>
       <html
@@ -29,3 +43,4 @@ export default function RootLayout({
     </ClerkProvider>
   );
 }
+

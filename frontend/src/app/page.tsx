@@ -18,10 +18,32 @@ import {
 // API Base URL - configure fallback to localhost
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+interface Segment {
+  type: "dialogue" | "narration";
+  text: string;
+  emotion: string;
+  color: string;
+}
+
+interface Character {
+  name: string;
+  mentions: number;
+  voice_profile: string;
+}
+
+interface AnnotatedContent {
+  preprocessed_text: string;
+  segments: Segment[];
+  characters: Character[];
+  emotion_summary: Record<string, number>;
+}
+
 interface Story {
   id: number;
   title: string;
   content: string;
+  nlp_status?: "pending" | "processing" | "completed" | "failed";
+  annotated_content?: AnnotatedContent | null;
   created_at: string;
 }
 
@@ -34,6 +56,7 @@ export default function Home() {
   
   // App States
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [stories, setStories] = useState<Story[]>([]);
@@ -43,14 +66,22 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch stories on load
-  const fetchStories = async () => {
+  const fetchStories = async (updatedSelectedId?: number) => {
     setIsLoadingStories(true);
     try {
       const res = await fetch(`${API_BASE_URL}/api/stories`);
       if (res.ok) {
         const data = await res.json();
         setStories(data);
-        if (data.length > 0 && !selectedStory) {
+        
+        // Keep selected story up to date
+        const idToFind = updatedSelectedId || selectedStory?.id;
+        if (idToFind) {
+          const updated = data.find((s: Story) => s.id === idToFind);
+          if (updated) {
+            setSelectedStory(updated);
+          }
+        } else if (data.length > 0) {
           setSelectedStory(data[0]);
         }
       }
@@ -58,6 +89,72 @@ export default function Home() {
       console.error("Failed to fetch stories:", err);
     } finally {
       setIsLoadingStories(false);
+    }
+  };
+
+  // Poll analysis status
+  const pollAnalysis = async (storyId: number) => {
+    let attempts = 0;
+    const maxAttempts = 30; // 30 attempts (45 seconds)
+    
+    const interval = setInterval(async () => {
+      attempts++;
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/analysis`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.nlp_status === "completed" || data.nlp_status === "failed") {
+            clearInterval(interval);
+            setIsAnalyzing(false);
+            fetchStories(storyId);
+            if (data.nlp_status === "completed") {
+              setSuccessMessage("NLP analysis completed successfully!");
+            } else {
+              setErrorMessage("NLP analysis failed.");
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Error polling analysis:", err);
+      }
+      
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        setIsAnalyzing(false);
+        setErrorMessage("Analysis timed out. Please try again.");
+      }
+    }, 1500);
+  };
+
+  // Handle triggering NLP pipeline
+  const handleAnalyzeStory = async (storyId: number) => {
+    setIsAnalyzing(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/analyze`, {
+        method: "POST",
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to trigger analysis");
+      }
+      
+      // Update local state to show processing immediately
+      if (selectedStory && selectedStory.id === storyId) {
+        setSelectedStory({
+          ...selectedStory,
+          nlp_status: "processing"
+        });
+      }
+      
+      // Start polling
+      pollAnalysis(storyId);
+    } catch (err: any) {
+      setErrorMessage(err.message || "An error occurred while triggering analysis.");
+      setIsAnalyzing(false);
     }
   };
 
@@ -462,31 +559,122 @@ export default function Home() {
             </div>
 
             {/* Selected Story Preview */}
-            <div className="bg-[#12121A] border border-[#1E1E2A] rounded-2xl p-6 shadow-xl flex-1 flex flex-col min-h-[300px]">
+            <div className="bg-[#12121A] border border-[#1E1E2A] rounded-2xl p-6 shadow-xl flex-1 flex flex-col min-h-[350px]">
               {selectedStory ? (
                 <div className="flex flex-col h-full space-y-4">
                   <div className="border-b border-[#1E1E2A] pb-3 flex justify-between items-start">
                     <div>
                       <h4 className="font-bold text-base text-zinc-100">{selectedStory.title}</h4>
                       <p className="text-[10px] text-zinc-500 mt-1 uppercase tracking-wider">
-                        Extracted text (character count: {selectedStory.content.length})
+                        {selectedStory.nlp_status === "completed" 
+                          ? `Analyzed Story (${selectedStory.content.length} characters)` 
+                          : `Extracted text (${selectedStory.content.length} characters)`}
                       </p>
                     </div>
+                    {selectedStory.nlp_status && (
+                      <span className={`text-[10px] font-semibold uppercase px-2.5 py-1 rounded-full border ${
+                        selectedStory.nlp_status === "completed"
+                          ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                          : selectedStory.nlp_status === "processing"
+                          ? "bg-amber-500/10 border-amber-500/30 text-amber-400 animate-pulse"
+                          : selectedStory.nlp_status === "failed"
+                          ? "bg-red-500/10 border-red-500/30 text-red-400"
+                          : "bg-zinc-500/10 border-zinc-500/30 text-zinc-400"
+                      }`}>
+                        {selectedStory.nlp_status}
+                      </span>
+                    )}
                   </div>
-                  <div className="flex-1 overflow-y-auto max-h-[300px] text-sm text-zinc-400 leading-relaxed bg-[#0B0B0F] p-4 rounded-xl border border-[#1E1E2A] custom-scrollbar whitespace-pre-wrap select-text">
-                    {selectedStory.content}
-                  </div>
-                  
-                  {/* Phase 4 Call to Action (Hooked for next phase) */}
-                  <div className="pt-2">
-                    <button 
-                      disabled
-                      className="w-full bg-[#1A1A24] border border-[#1E1E2A] text-[#7C5CFF] opacity-60 font-semibold py-2.5 rounded-xl text-xs flex items-center justify-center space-x-1 cursor-not-allowed"
-                    >
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>Process NLP Pipeline (Phase 4 Coming Soon)</span>
-                    </button>
-                  </div>
+
+                  {selectedStory.nlp_status === "processing" ? (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center py-12 space-y-4">
+                      <Loader2 className="w-8 h-8 animate-spin text-[#7C5CFF]" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-zinc-200">Analyzing Story Content</p>
+                        <p className="text-xs text-zinc-500 max-w-[280px] mx-auto">
+                          Running NLP pipeline to extract characters, segments, and emotional tones...
+                        </p>
+                      </div>
+                    </div>
+                  ) : selectedStory.nlp_status === "completed" && selectedStory.annotated_content ? (
+                    <div className="flex-1 flex flex-col space-y-4 min-h-0">
+                      {/* Character Lists */}
+                      {selectedStory.annotated_content.characters && selectedStory.annotated_content.characters.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Detected Characters & Voices</h5>
+                          <div className="flex flex-wrap gap-1.5">
+                            {selectedStory.annotated_content.characters.map((char) => (
+                              <span key={char.name} className="px-2.5 py-1 bg-[#1A1A24] border border-[#1E1E2A] text-zinc-300 rounded-lg text-xs font-medium flex items-center space-x-1.5 hover:border-[#7C5CFF]/30 transition-colors">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#7C5CFF]" />
+                                <span>{char.name}</span>
+                                <span className="text-[10px] text-zinc-500">({char.voice_profile})</span>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-2.5 bg-[#1A1A24]/50 border border-[#1E1E2A] rounded-xl text-[11px] text-zinc-500">
+                          No characters detected in this story.
+                        </div>
+                      )}
+
+                      {/* Annotated Content Blocks */}
+                      <div className="flex-1 overflow-y-auto max-h-[260px] text-sm text-zinc-300 leading-relaxed bg-[#0B0B0F] p-4 rounded-xl border border-[#1E1E2A] custom-scrollbar space-y-2 select-text">
+                        {selectedStory.annotated_content.segments.map((seg, idx) => (
+                          <span 
+                            key={idx} 
+                            className={`inline px-1 py-0.5 rounded transition-all duration-200 cursor-help ${
+                              seg.type === "dialogue" ? "font-semibold border-b border-dashed border-zinc-700" : ""
+                            }`}
+                            style={{ 
+                              backgroundColor: `${seg.color}15`, // 8% opacity
+                              borderLeft: `2.5px solid ${seg.color}`,
+                              paddingLeft: '6px'
+                            }}
+                            title={`${seg.type.toUpperCase()} | Emotion: ${seg.emotion}`}
+                          >
+                            {seg.text}{" "}
+                          </span>
+                        ))}
+                      </div>
+
+                      {/* Legend */}
+                      <div className="flex flex-wrap gap-x-3 gap-y-1.5 text-[10px] text-zinc-500 pt-2 border-t border-[#1E1E2A]/50">
+                        <span className="font-semibold uppercase tracking-wider text-zinc-600">Emotion Map:</span>
+                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#F5C518]" /> <span>Happy</span></span>
+                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#4A90D9]" /> <span>Sad</span></span>
+                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#E84040]" /> <span>Angry</span></span>
+                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#9B59B6]" /> <span>Suspenseful</span></span>
+                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#A0A0A0]" /> <span>Neutral</span></span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 flex flex-col space-y-4">
+                      <div className="flex-1 overflow-y-auto max-h-[300px] text-sm text-zinc-400 leading-relaxed bg-[#0B0B0F] p-4 rounded-xl border border-[#1E1E2A] custom-scrollbar whitespace-pre-wrap select-text">
+                        {selectedStory.content}
+                      </div>
+                      
+                      <div className="pt-2">
+                        <button 
+                          onClick={() => handleAnalyzeStory(selectedStory.id)}
+                          disabled={isAnalyzing}
+                          className="w-full bg-gradient-to-r from-[#7C5CFF] to-[#A78BFA] hover:from-[#6b4ae6] hover:to-[#9675e8] active:scale-[0.98] text-white font-semibold py-3 rounded-xl transition-all duration-200 shadow-lg shadow-[#7C5CFF]/20 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
+                        >
+                          {isAnalyzing ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <span>Requesting analysis...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-4 h-4" />
+                              <span>Process NLP Pipeline (Phase 4)</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-center text-zinc-500 py-16">

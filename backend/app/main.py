@@ -1,12 +1,15 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 import os
+import logging
 
 from .database import engine, Base, get_db
 from . import models
 from .utils.parser import parse_document
+
+logger = logging.getLogger(__name__)
 
 # Force database tables creation on start (especially useful for SQLite)
 models.Base.metadata.create_all(bind=engine)
@@ -27,6 +30,7 @@ storage_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 os.makedirs(storage_path, exist_ok=True)
 app.mount("/static", StaticFiles(directory=storage_path), name="static")
 
+
 # Helper function to get or create a default user for local testing
 def get_default_user_id(db: Session) -> int:
     default_user = db.query(models.User).filter_by(email="guest@storyvoice.ai").first()
@@ -37,14 +41,21 @@ def get_default_user_id(db: Session) -> int:
         db.refresh(default_user)
     return default_user.id
 
+
+# ---------------------------------------------------------------------------
+# Phase 1 / Phase 3 Endpoints
+# ---------------------------------------------------------------------------
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to StoryVoice AI API"}
+
 
 @app.get("/api/stories")
 def list_stories(db: Session = Depends(get_db)):
     stories = db.query(models.Story).order_by(models.Story.created_at.desc()).all()
     return stories
+
 
 @app.get("/api/stories/{story_id}")
 def get_story(story_id: int, db: Session = Depends(get_db)):
@@ -53,43 +64,45 @@ def get_story(story_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Story not found")
     return story
 
+
 @app.post("/api/stories")
 def create_story(
-    title: str = Form(...), 
-    content: str = Form(...), 
-    db: Session = Depends(get_db)
+    title: str = Form(...),
+    content: str = Form(...),
+    db: Session = Depends(get_db),
 ):
     if not title.strip() or not content.strip():
         raise HTTPException(status_code=400, detail="Title and Content cannot be empty")
-        
+
     owner_id = get_default_user_id(db)
     story = models.Story(title=title, content=content, owner_id=owner_id)
     db.add(story)
     db.commit()
     db.refresh(story)
     return story
+
 
 @app.post("/api/stories/upload")
 async def upload_story_file(
     file: UploadFile = File(...),
     title: str = Form(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     file_bytes = await file.read()
     if len(file_bytes) == 0:
         raise HTTPException(status_code=400, detail="File is empty")
-        
+
     if not title or not title.strip():
         title = os.path.splitext(file.filename)[0].replace("_", " ").replace("-", " ").title()
-        
+
     try:
         content = parse_document(file_bytes, file.filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-        
+
     if not content.strip():
         raise HTTPException(status_code=400, detail="Extracted text from document is empty")
-        
+
     owner_id = get_default_user_id(db)
     story = models.Story(title=title, content=content, owner_id=owner_id)
     db.add(story)
@@ -97,3 +110,91 @@ async def upload_story_file(
     db.refresh(story)
     return story
 
+
+# ---------------------------------------------------------------------------
+# Phase 4: NLP Pipeline Endpoints
+# ---------------------------------------------------------------------------
+
+def _run_and_save_pipeline(story_id: int):
+    """Background worker: run NLP pipeline and persist results."""
+    from .utils.nlp_pipeline import run_nlp_pipeline
+
+    db: Session = next(get_db())
+    try:
+        story = db.query(models.Story).filter(models.Story.id == story_id).first()
+        if not story:
+            return
+
+        story.nlp_status = "processing"
+        db.commit()
+
+        result = run_nlp_pipeline(story.content)
+
+        story.annotated_content = result
+        story.nlp_status = "completed"
+        db.commit()
+        logger.info("NLP pipeline completed for story_id=%s", story_id)
+
+    except Exception as exc:
+        logger.error("NLP pipeline failed for story_id=%s: %s", story_id, exc)
+        try:
+            story = db.query(models.Story).filter(models.Story.id == story_id).first()
+            if story:
+                story.nlp_status = "failed"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+@app.post("/api/stories/{story_id}/analyze")
+def analyze_story(
+    story_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Task 4.6 — Trigger NLP analysis for a given story.
+    Runs the full pipeline (preprocess -> segment -> emotion -> NER) and
+    saves the result to `story.annotated_content`.
+
+    Returns immediately with `nlp_status = processing` and runs the
+    heavy work in a FastAPI BackgroundTask so the API stays responsive.
+    """
+    story = db.query(models.Story).filter(models.Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+
+    if not story.content or not story.content.strip():
+        raise HTTPException(status_code=400, detail="Story has no content to analyze")
+
+    # Update status immediately so the client can poll
+    story.nlp_status = "processing"
+    db.commit()
+
+    background_tasks.add_task(_run_and_save_pipeline, story_id)
+
+    return {
+        "story_id": story_id,
+        "nlp_status": "processing",
+        "message": "NLP analysis started. Poll GET /api/stories/{story_id}/analysis for results.",
+    }
+
+
+@app.get("/api/stories/{story_id}/analysis")
+def get_story_analysis(story_id: int, db: Session = Depends(get_db)):
+    """
+    Return the NLP analysis result for a story.
+    Includes segments with emotion labels, character list, and emotion summary.
+    """
+    story = db.query(models.Story).filter(models.Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+
+    return {
+        "story_id": story_id,
+        "title": story.title,
+        "nlp_status": story.nlp_status,
+        "annotated_content": story.annotated_content,
+    }

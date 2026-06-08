@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, JSON
 from sqlalchemy.orm import relationship
 import enum
 import datetime
@@ -25,6 +25,9 @@ class Story(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, index=True)
     content = Column(Text)
+    # Phase 4: NLP pipeline output (structured JSON)
+    annotated_content = Column(JSON, nullable=True)
+    nlp_status = Column(String, default="pending")   # pending | processing | completed | failed
     owner_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
@@ -42,3 +45,4 @@ class Job(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     
     story = relationship("Story", back_populates="jobs")
+
