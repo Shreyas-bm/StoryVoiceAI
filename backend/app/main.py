@@ -198,3 +198,90 @@ def get_story_analysis(story_id: int, db: Session = Depends(get_db)):
         "nlp_status": story.nlp_status,
         "annotated_content": story.annotated_content,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Audio Generation Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/stories/{story_id}/generate-audio")
+def trigger_audio_generation(story_id: int, db: Session = Depends(get_db)):
+    """
+    Task 5.6 & Celery Trigger — Trigger procedural audio generation for a story.
+    Creates a new Job in the database and queues the Celery task.
+    """
+    story = db.query(models.Story).filter(models.Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+        
+    if not story.annotated_content:
+        raise HTTPException(
+            status_code=400,
+            detail="Story has not been analyzed yet. Run POST /api/stories/{story_id}/analyze first."
+        )
+        
+    # Queue new audio generation job
+    from .celery_app import generate_audio_task
+    
+    # Create the job
+    job = models.Job(story_id=story_id, status=models.JobStatus.PENDING)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    
+    # Trigger Celery task asynchronously
+    generate_audio_task.delay(job.id)
+    
+    return {
+        "job_id": job.id,
+        "story_id": story_id,
+        "status": job.status.value,
+        "message": "Audio generation started. Poll GET /api/stories/{story_id}/audio-status for results."
+    }
+
+
+@app.get("/api/stories/{story_id}/audio-status")
+def get_latest_audio_status(story_id: int, db: Session = Depends(get_db)):
+    """
+    Get the status of the latest audio generation job for a story.
+    """
+    story = db.query(models.Story).filter(models.Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+        
+    # Find latest job
+    latest_job = db.query(models.Job).filter(models.Job.story_id == story_id).order_by(models.Job.created_at.desc()).first()
+    if not latest_job:
+        return {
+            "story_id": story_id,
+            "status": "none",
+            "message": "No audio generation job has been triggered for this story."
+        }
+        
+    return {
+        "job_id": latest_job.id,
+        "story_id": story_id,
+        "status": latest_job.status.value,
+        "audio_url": latest_job.audio_url,
+        "created_at": latest_job.created_at,
+        "updated_at": latest_job.updated_at
+    }
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_status(job_id: int, db: Session = Depends(get_db)):
+    """
+    Get the status of a specific audio generation job.
+    """
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    return {
+        "job_id": job.id,
+        "story_id": job.story_id,
+        "status": job.status.value,
+        "audio_url": job.audio_url,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at
+    }
