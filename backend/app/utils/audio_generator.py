@@ -13,11 +13,71 @@ SAMPLE_RATE = 22050
 
 def generate_procedural_speech(text: str, voice_profile: str, emotion: str, output_path: str):
     """
-    Procedural audio speech generator (chiptune/synthesizer style).
-    Generates distinct sounds based on characters and emotions with varying pitch, tempo, and timbre.
-    Requires no external dependencies (pure Python wave generation).
+    Procedural audio speech generator (chiptune/synthesizer style) with a pyttsx3 spoken speech optimizer.
+    Generates spoken audio on supported systems, and falls back to chiptune waves on unsupported systems.
     """
     logger.info(f"Synthesizing segment: '{text[:30]}...' with profile={voice_profile}, emotion={emotion}")
+    
+    # Try spoken TTS first
+    try:
+        import pyttsx3
+        logger.info("Initializing pyttsx3 offline text-to-speech engine...")
+        engine = pyttsx3.init()
+        voices = engine.getProperty("voices")
+        
+        # Select voice based on profile
+        selected_voice_id = None
+        if "light" in voice_profile or "soft" in voice_profile or "female" in voice_profile:
+            for v in voices:
+                if "zira" in v.name.lower():
+                    selected_voice_id = v.id
+                    break
+        else:
+            for v in voices:
+                if "david" in v.name.lower():
+                    selected_voice_id = v.id
+                    break
+                    
+        if selected_voice_id:
+            engine.setProperty("voice", selected_voice_id)
+            
+        # Select speech rate based on emotion
+        rate = 180
+        if emotion == "happy":
+            rate = 210
+        elif emotion == "sad":
+            rate = 145
+        elif emotion == "angry":
+            rate = 220
+        elif emotion == "suspenseful":
+            rate = 150
+        engine.setProperty("rate", rate)
+        
+        # Select volume based on emotion
+        volume = 1.0
+        if emotion == "sad":
+            volume = 0.75
+        elif emotion == "suspenseful":
+            volume = 0.65
+        engine.setProperty("volume", volume)
+        
+        # Ensure output directory exists
+        dir_name = os.path.dirname(output_path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+            
+        # Save to file
+        engine.save_to_file(text, output_path)
+        engine.runAndWait()
+        
+        # Verify the file was generated and is valid (not 0 bytes)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+            logger.info(f"Successfully generated spoken speech at {output_path}")
+            return
+        else:
+            logger.warning("pyttsx3 output file was invalid. Falling back to chiptune generator.")
+    except Exception as exc:
+        logger.warning(f"pyttsx3 speech synthesis failed: {exc}. Falling back to chiptune generator.")
     
     # Base frequency/pitch based on voice profile
     base_freq = 180.0

@@ -12,7 +12,14 @@ import {
   Check, 
   FileUp, 
   ChevronRight,
-  AlertTriangle
+  AlertTriangle,
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Download,
+  RotateCcw,
+  Headphones
 } from "lucide-react";
 
 // API Base URL - configure fallback to localhost
@@ -63,7 +70,24 @@ export default function Home() {
   const [isLoadingStories, setIsLoadingStories] = useState(false);
   const [selectedStory, setSelectedStory] = useState<Story | null>(null);
 
+  // Audio Generation States
+  const [audioStatus, setAudioStatus] = useState<"none" | "pending" | "processing" | "completed" | "failed">("none");
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioJobId, setAudioJobId] = useState<number | null>(null);
+  const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  
+  // Custom Audio Player States
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1.0);
+  const [dynamicStatusText, setDynamicStatusText] = useState("Initializing audio engine...");
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioIntervalRef = useRef<any>(null);
 
   // Fetch stories on load
   const fetchStories = async (updatedSelectedId?: number) => {
@@ -157,6 +181,251 @@ export default function Home() {
       setIsAnalyzing(false);
     }
   };
+
+  // Helper to format time MM:SS
+  const formatTime = (timeInSeconds: number) => {
+    if (isNaN(timeInSeconds)) return "00:00";
+    const mins = Math.floor(timeInSeconds / 60);
+    const secs = Math.floor(timeInSeconds % 60);
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  // Poll audio generation job status
+  const pollAudioStatus = (storyId: number) => {
+    if (audioIntervalRef.current) {
+      clearInterval(audioIntervalRef.current);
+    }
+    
+    let attempts = 0;
+    const maxAttempts = 60; // 90 seconds (60 * 1.5s)
+    
+    audioIntervalRef.current = setInterval(async () => {
+      attempts++;
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/audio-status`);
+        if (res.ok) {
+          const data = await res.json();
+          setAudioStatus(data.status);
+          setAudioUrl(data.audio_url);
+          setAudioJobId(data.job_id);
+          
+          if (data.status === "completed" || data.status === "failed") {
+            if (audioIntervalRef.current) {
+              clearInterval(audioIntervalRef.current);
+              audioIntervalRef.current = null;
+            }
+            if (data.status === "completed") {
+              setSuccessMessage("Audiobook generated successfully!");
+            } else {
+              setErrorMessage("Audiobook generation failed.");
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Error polling audio status:", err);
+      }
+      
+      if (attempts >= maxAttempts) {
+        if (audioIntervalRef.current) {
+          clearInterval(audioIntervalRef.current);
+          audioIntervalRef.current = null;
+        }
+        setAudioStatus("failed");
+        setErrorMessage("Audio generation timed out. Please try again.");
+      }
+    }, 1500);
+  };
+
+  // Fetch audio status for a story
+  const fetchAudioStatus = async (storyId: number) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/audio-status`);
+      if (res.ok) {
+        const data = await res.json();
+        setAudioStatus(data.status);
+        setAudioUrl(data.audio_url);
+        setAudioJobId(data.job_id);
+        
+        if (data.status === "pending" || data.status === "processing") {
+          pollAudioStatus(storyId);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch audio status:", err);
+    }
+  };
+
+  // Trigger audio generation
+  const handleGenerateAudio = async (storyId: number) => {
+    // Stop any active audio playback
+    if (audioRef.current) {
+      try {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      } catch (err) {
+        console.error("Failed to stop playback during regeneration:", err);
+      }
+    }
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+    
+    setIsGeneratingAudio(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setAudioStatus("pending");
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/generate-audio`, {
+        method: "POST",
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to trigger audio generation");
+      }
+      
+      const data = await res.json();
+      setAudioStatus(data.status);
+      setAudioJobId(data.job_id);
+      
+      pollAudioStatus(storyId);
+    } catch (err: any) {
+      setErrorMessage(err.message || "An error occurred while generating audio.");
+      setAudioStatus("failed");
+    } finally {
+      setIsGeneratingAudio(false);
+    }
+  };
+
+  // Audio Player Event Handlers
+  const handleTimeUpdate = () => {
+    if (audioRef.current) {
+      setCurrentTime(audioRef.current.currentTime);
+    }
+  };
+
+  const handleDurationChange = () => {
+    if (audioRef.current) {
+      setDuration(audioRef.current.duration);
+    }
+  };
+
+  const handleAudioEnded = () => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+  };
+
+  const togglePlayPause = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().catch(err => {
+        console.error("Audio playback failed:", err);
+      });
+      setIsPlaying(true);
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!audioRef.current) return;
+    const newTime = parseFloat(e.target.value);
+    audioRef.current.currentTime = newTime;
+    setCurrentTime(newTime);
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setVolume(val);
+    setIsMuted(val === 0);
+    if (audioRef.current) {
+      audioRef.current.volume = val;
+      audioRef.current.muted = val === 0;
+    }
+  };
+
+  const toggleMute = () => {
+    if (!audioRef.current) return;
+    const nextMute = !isMuted;
+    setIsMuted(nextMute);
+    audioRef.current.muted = nextMute;
+  };
+
+  const cyclePlaybackRate = () => {
+    if (!audioRef.current) return;
+    let nextRate = 1.0;
+    if (playbackRate === 1.0) nextRate = 1.25;
+    else if (playbackRate === 1.25) nextRate = 1.5;
+    else if (playbackRate === 1.5) nextRate = 2.0;
+    else nextRate = 1.0;
+    
+    setPlaybackRate(nextRate);
+    audioRef.current.playbackRate = nextRate;
+  };
+
+  // Reset audio states and poll when story changes
+  useEffect(() => {
+    if (selectedStory) {
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+      
+      if (audioIntervalRef.current) {
+        clearInterval(audioIntervalRef.current);
+        audioIntervalRef.current = null;
+      }
+      
+      setAudioStatus("none");
+      setAudioUrl(null);
+      setAudioJobId(null);
+      
+      fetchAudioStatus(selectedStory.id);
+      
+      // Auto-poll NLP analysis if currently pending or processing
+      if (selectedStory.nlp_status === "processing" || selectedStory.nlp_status === "pending") {
+        setIsAnalyzing(true);
+        pollAnalysis(selectedStory.id);
+      }
+    }
+  }, [selectedStory?.id]);
+
+  // Cycle status texts during audio generation
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (audioStatus === "pending" || audioStatus === "processing") {
+      const statuses = [
+        "Initializing audio generation task...",
+        "Reading character voice configurations...",
+        "Synthesizing narration sections (warm narrator)...",
+        "Synthesizing dialogue sections...",
+        "Applying emotion profiles (happy, sad, suspenseful)...",
+        "Mixing audio files and adjusting pitch...",
+        "Merging audio segments into final audiobook...",
+        "Uploading audio to storage...",
+        "Finishing up..."
+      ];
+      let idx = 0;
+      setDynamicStatusText(statuses[0]);
+      interval = setInterval(() => {
+        idx = (idx + 1) % statuses.length;
+        setDynamicStatusText(statuses[idx]);
+      }, 2500);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [audioStatus]);
+
+  // Clean up interval on unmount
+  useEffect(() => {
+    return () => {
+      if (audioIntervalRef.current) {
+        clearInterval(audioIntervalRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     fetchStories();
@@ -647,6 +916,176 @@ export default function Home() {
                         <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#9B59B6]" /> <span>Suspenseful</span></span>
                         <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#A0A0A0]" /> <span>Neutral</span></span>
                       </div>
+
+                      {/* Audio Controller Section */}
+                      <div className="border-t border-[#1E1E2A]/50 pt-4 mt-2">
+                        {/* If no audio generated yet */}
+                        {audioStatus === "none" && (
+                          <button
+                            onClick={() => handleGenerateAudio(selectedStory.id)}
+                            disabled={isGeneratingAudio}
+                            className="w-full bg-gradient-to-r from-[#7C5CFF] via-[#8B5CF6] to-[#00D4FF] hover:opacity-95 active:scale-[0.99] text-white font-semibold py-2.5 px-4 rounded-xl transition-all duration-200 shadow-lg shadow-[#7C5CFF]/20 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                          >
+                            {isGeneratingAudio ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                <span>Starting Audio Pipeline...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Music className="w-4 h-4" />
+                                <span>Generate Audiobook (Procedural Synthesizer)</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+
+                        {/* If audio is generating (pending or processing) */}
+                        {(audioStatus === "pending" || audioStatus === "processing") && (
+                          <div className="bg-[#161622] border border-[#1E1E2A] rounded-xl p-4 flex flex-col space-y-3 relative overflow-hidden">
+                            {/* Glow bar effect */}
+                            <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-[#7C5CFF] to-[#00D4FF] animate-pulse" />
+                            
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-2">
+                                <Loader2 className="w-4 h-4 animate-spin text-[#7C5CFF]" />
+                                <span className="text-xs font-semibold text-zinc-200">
+                                  {audioStatus === "pending" ? "Queueing audio task..." : "Generating audio..."}
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-zinc-500 font-mono">Status: {audioStatus}</span>
+                            </div>
+
+                            {/* Progress Shimmer Bar */}
+                            <div className="w-full h-1.5 bg-[#0B0B0F] rounded-full overflow-hidden relative">
+                              <div className="absolute top-0 bottom-0 left-0 w-1/2 bg-gradient-to-r from-[#7C5CFF] to-[#00D4FF] rounded-full animate-shimmer-progress" />
+                            </div>
+
+                            <p className="text-[11px] text-zinc-400 italic text-center">
+                              {dynamicStatusText}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* If audio failed */}
+                        {audioStatus === "failed" && (
+                          <div className="bg-red-500/5 border border-red-500/10 rounded-xl p-4 flex flex-col space-y-3">
+                            <div className="flex items-center space-x-2 text-red-400">
+                              <AlertTriangle className="w-4 h-4 shrink-0" />
+                              <span className="text-xs font-semibold">Audio Generation Failed</span>
+                            </div>
+                            <p className="text-[11px] text-zinc-500">
+                              An error occurred during audio synthesis. Please verify your story text and try again.
+                            </p>
+                            <button
+                              onClick={() => handleGenerateAudio(selectedStory.id)}
+                              className="w-full bg-[#1A1A24] border border-[#1E1E2A] hover:border-red-500/30 text-zinc-300 font-semibold py-2 rounded-lg text-xs transition-colors flex items-center justify-center space-x-2 cursor-pointer"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Retry Generation</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {/* If audio is completed -> Show custom audio player */}
+                        {audioStatus === "completed" && audioUrl && (
+                          <div className="bg-[#161622] border border-[#1E1E2A] rounded-xl p-4 flex flex-col space-y-3">
+                            {/* Hidden HTML5 Audio Element */}
+                            <audio
+                              ref={audioRef}
+                              src={audioUrl.startsWith("http") ? audioUrl : `${API_BASE_URL}${audioUrl}`}
+                              onTimeUpdate={handleTimeUpdate}
+                              onDurationChange={handleDurationChange}
+                              onEnded={handleAudioEnded}
+                            />
+                            
+                            {/* Audio details */}
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-2 text-xs text-zinc-400">
+                                <Headphones className="w-3.5 h-3.5 text-[#00D4FF]" />
+                                <span className="font-semibold text-zinc-300">Generated Audiobook</span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                {/* Download button */}
+                                <a
+                                  href={audioUrl.startsWith("http") ? audioUrl : `${API_BASE_URL}${audioUrl}`}
+                                  download={`storyvoice_${selectedStory.id}.wav`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="p-1.5 bg-[#1E1E2A] hover:bg-[#7C5CFF]/20 border border-[#2E2E3A] hover:border-[#7C5CFF]/40 rounded-lg text-zinc-400 hover:text-white transition-all duration-200 cursor-pointer"
+                                  title="Download Audio File"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                </a>
+                                {/* Re-generate button */}
+                                <button
+                                  onClick={() => handleGenerateAudio(selectedStory.id)}
+                                  className="p-1.5 bg-[#1E1E2A] hover:bg-[#7C5CFF]/20 border border-[#2E2E3A] hover:border-[#7C5CFF]/40 rounded-lg text-zinc-400 hover:text-white transition-all duration-200 cursor-pointer"
+                                  title="Regenerate Audio"
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Progress bar / scrub bar */}
+                            <div className="flex items-center space-x-3">
+                              <span className="text-[10px] text-zinc-500 font-mono w-10 text-right">
+                                {formatTime(currentTime)}
+                              </span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={duration || 100}
+                                value={currentTime}
+                                onChange={handleSeek}
+                                className="flex-1 h-1 bg-[#0B0B0F] rounded-lg appearance-none cursor-pointer accent-[#7C5CFF] hover:accent-[#00D4FF] focus:outline-none"
+                              />
+                              <span className="text-[10px] text-zinc-500 font-mono w-10">
+                                {formatTime(duration)}
+                              </span>
+                            </div>
+
+                            {/* Player Controls */}
+                            <div className="flex items-center justify-between pt-1">
+                              {/* Playback speed */}
+                              <button
+                                onClick={cyclePlaybackRate}
+                                className="text-[10px] font-semibold font-mono text-zinc-400 bg-[#1A1A24] border border-[#2E2E3A] px-2 py-1 rounded hover:text-white transition-colors cursor-pointer"
+                              >
+                                {playbackRate}x
+                              </button>
+
+                              {/* Play / Pause */}
+                              <button
+                                onClick={togglePlayPause}
+                                className="w-10 h-10 rounded-full bg-gradient-to-tr from-[#7C5CFF] to-[#00D4FF] hover:scale-105 active:scale-95 text-white flex items-center justify-center shadow-md shadow-[#7C5CFF]/20 transition-all duration-200 cursor-pointer"
+                              >
+                                {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white translate-x-[1px]" />}
+                              </button>
+
+                              {/* Volume Controls */}
+                              <div className="flex items-center space-x-1.5">
+                                <button
+                                  onClick={toggleMute}
+                                  className="text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
+                                >
+                                  {isMuted || volume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                                </button>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  value={isMuted ? 0 : volume}
+                                  onChange={handleVolumeChange}
+                                  className="w-16 h-1 bg-[#0B0B0F] rounded-lg appearance-none cursor-pointer accent-[#00D4FF]"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     <div className="flex-1 flex flex-col space-y-4">
@@ -715,6 +1154,13 @@ export default function Home() {
         }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
           background: #7C5CFF/30;
+        }
+        @keyframes shimmer-progress {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(200%); }
+        }
+        .animate-shimmer-progress {
+          animation: shimmer-progress 2s infinite linear;
         }
       `}</style>
     </div>

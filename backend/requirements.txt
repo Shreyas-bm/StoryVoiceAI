@@ -12,3 +12,4 @@ python-docx
 transformers
 torch
 spacy
+pyttsx3

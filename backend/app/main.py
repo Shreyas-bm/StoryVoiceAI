@@ -67,6 +67,7 @@ def get_story(story_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/stories")
 def create_story(
+    background_tasks: BackgroundTasks,
     title: str = Form(...),
     content: str = Form(...),
     db: Session = Depends(get_db),
@@ -75,15 +76,18 @@ def create_story(
         raise HTTPException(status_code=400, detail="Title and Content cannot be empty")
 
     owner_id = get_default_user_id(db)
-    story = models.Story(title=title, content=content, owner_id=owner_id)
+    story = models.Story(title=title, content=content, owner_id=owner_id, nlp_status="processing")
     db.add(story)
     db.commit()
     db.refresh(story)
+    
+    background_tasks.add_task(_run_and_save_pipeline, story.id)
     return story
 
 
 @app.post("/api/stories/upload")
 async def upload_story_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str = Form(None),
     db: Session = Depends(get_db),
@@ -104,10 +108,12 @@ async def upload_story_file(
         raise HTTPException(status_code=400, detail="Extracted text from document is empty")
 
     owner_id = get_default_user_id(db)
-    story = models.Story(title=title, content=content, owner_id=owner_id)
+    story = models.Story(title=title, content=content, owner_id=owner_id, nlp_status="processing")
     db.add(story)
     db.commit()
     db.refresh(story)
+    
+    background_tasks.add_task(_run_and_save_pipeline, story.id)
     return story
 
 
