@@ -25,10 +25,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure local storage directory exists and mount it as static files
-storage_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "storage")
-os.makedirs(storage_path, exist_ok=True)
-app.mount("/static", StaticFiles(directory=storage_path), name="static")
+# Serve static files directly from in-memory storage to avoid persisting files to disk
+from fastapi import Response
+from .utils.storage import IN_MEMORY_STORAGE
+
+@app.get("/static/{file_path:path}")
+def serve_static_in_memory(file_path: str):
+    key = file_path.replace("\\", "/")
+    if key in IN_MEMORY_STORAGE:
+        return Response(content=IN_MEMORY_STORAGE[key], media_type="audio/wav")
+    raise HTTPException(status_code=404, detail="File not found in memory")
 
 
 # Helper function to get or create a default user for local testing
@@ -124,32 +130,40 @@ async def upload_story_file(
 def _run_and_save_pipeline(story_id: int):
     """Background worker: run NLP pipeline and persist results."""
     from .utils.nlp_pipeline import run_nlp_pipeline
+    print(f"[BG TASK] Started for story_id={story_id}")
 
     db: Session = next(get_db())
     try:
         story = db.query(models.Story).filter(models.Story.id == story_id).first()
         if not story:
+            print(f"[BG TASK] Story {story_id} not found!")
             return
 
         story.nlp_status = "processing"
         db.commit()
+        print(f"[BG TASK] Story {story_id} status set to processing")
 
         result = run_nlp_pipeline(story.content)
+        print(f"[BG TASK] NLP pipeline finished running for story_id={story_id}")
 
         story.annotated_content = result
         story.nlp_status = "completed"
         db.commit()
+        print(f"[BG TASK] Story {story_id} status set to completed")
         logger.info("NLP pipeline completed for story_id=%s", story_id)
 
     except Exception as exc:
+        print(f"[BG TASK] Exception in pipeline for story_id={story_id}: {exc}")
+        import traceback
+        traceback.print_exc()
         logger.error("NLP pipeline failed for story_id=%s: %s", story_id, exc)
         try:
             story = db.query(models.Story).filter(models.Story.id == story_id).first()
             if story:
                 story.nlp_status = "failed"
                 db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[BG TASK] Error setting failed status: {e}")
     finally:
         db.close()
 
@@ -211,11 +225,18 @@ def get_story_analysis(story_id: int, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/stories/{story_id}/generate-audio")
-def trigger_audio_generation(story_id: int, db: Session = Depends(get_db)):
+def trigger_audio_generation(
+    story_id: int, 
+    narrator_voice: str = "male", 
+    db: Session = Depends(get_db)
+):
     """
     Task 5.6 & Celery Trigger — Trigger procedural audio generation for a story.
     Creates a new Job in the database and queues the Celery task.
     """
+    if narrator_voice not in ("male", "female"):
+        raise HTTPException(status_code=400, detail="narrator_voice must be either 'male' or 'female'")
+
     story = db.query(models.Story).filter(models.Story.id == story_id).first()
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
@@ -236,7 +257,7 @@ def trigger_audio_generation(story_id: int, db: Session = Depends(get_db)):
     db.refresh(job)
     
     # Trigger Celery task asynchronously
-    generate_audio_task.delay(job.id)
+    generate_audio_task.delay(job.id, narrator_voice=narrator_voice)
     
     return {
         "job_id": job.id,

@@ -1,37 +1,44 @@
-from celery import Celery
 import os
+import threading
+import logging
 from dotenv import load_dotenv
-import redis
 
 load_dotenv()
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# Zero-dependency background task runner replacing Celery/Redis
+class MockAsyncResult:
+    def __init__(self, thread, result_val=True):
+        self.thread = thread
+        self.result_val = result_val
 
-# Check if Redis is running, otherwise fallback to Celery's eager execution mode
-use_eager = False
-try:
-    r = redis.from_url(REDIS_URL, socket_timeout=2)
-    r.ping()
-    print("Connected to Redis successfully.")
-except Exception as e:
-    print(f"Redis connection failed: {e}. Celery falling back to eager execution mode.")
-    use_eager = True
+    def get(self, timeout=None):
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout)
+        return self.result_val
 
-celery_app = Celery(
-    "storyvoice_worker",
-    broker=REDIS_URL if not use_eager else "memory://",
-    backend=REDIS_URL if not use_eager else "cache+memory://"
-)
+class MockTask:
+    def __init__(self, func):
+        self.func = func
 
-celery_app.conf.update(
-    task_serializer='json',
-    accept_content=['json'],
-    result_serializer='json',
-    timezone='UTC',
-    enable_utc=True,
-    task_always_eager=use_eager,
-    task_eager_propagates=use_eager
-)
+    def __call__(self, *args, **kwargs):
+        return self.func(*args, **kwargs)
+
+    def delay(self, *args, **kwargs):
+        # Run in a background thread so the API remains non-blocking
+        t = threading.Thread(target=self.func, args=args, kwargs=kwargs)
+        t.start()
+        return MockAsyncResult(t)
+
+class MockCelery:
+    def __init__(self, *args, **kwargs):
+        self.conf = type("Conf", (), {"update": lambda self, *args, **kwargs: None})()
+
+    def task(self, *args, **kwargs):
+        def decorator(func):
+            return MockTask(func)
+        return decorator
+
+celery_app = MockCelery()
 
 @celery_app.task(name="dummy_task")
 def dummy_task():
@@ -39,13 +46,12 @@ def dummy_task():
 
 
 @celery_app.task(name="generate_audio_task")
-def generate_audio_task(job_id: int):
+def generate_audio_task(job_id: int, narrator_voice: str = "male"):
     """
-    Celery task that retrieves annotated text, generates audio segments,
-    concatenates them, uploads to storage, and updates the database Job.
+    Background task that retrieves annotated text, generates audio segments,
+    concatenates them, uploads to storage, and updates the Job.
     """
-    import logging
-    from .database import SessionLocal
+    from .database import SessionLocal, flag_modified
     from .models import Job, JobStatus, Story
     from .utils.audio_generator import generate_procedural_speech, concatenate_wav_files, get_voice_profile_for_segment
     from .utils.storage import upload_file
@@ -55,6 +61,8 @@ def generate_audio_task(job_id: int):
     task_logger.info(f"Starting audio generation for job_id={job_id}")
     
     db = SessionLocal()
+    temp_files = []
+    temp_out_path = None
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
@@ -87,12 +95,11 @@ def generate_audio_task(job_id: int):
             db.commit()
             return False
             
-        temp_files = []
         prev_text = ""
         
         # Generate audio segments for each text chunk
         for idx, segment in enumerate(segments):
-            voice = get_voice_profile_for_segment(segment, characters, prev_text)
+            voice = get_voice_profile_for_segment(segment, characters, prev_text, narrator_voice=narrator_voice)
             emotion = segment.get("emotion", "neutral")
             text = segment.get("text", "")
             
@@ -107,6 +114,20 @@ def generate_audio_task(job_id: int):
                 output_path=temp_seg_path
             )
             
+            # Get duration of generated WAV
+            seg_duration = 0.0
+            try:
+                import wave
+                with wave.open(temp_seg_path, 'rb') as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate()
+                    if rate > 0:
+                        seg_duration = frames / float(rate)
+            except Exception as e:
+                task_logger.warning(f"Failed to read WAV duration for segment {idx}: {e}")
+            
+            segment["duration"] = seg_duration
+            print(f"[TASK DEBUG] Segment {idx} text={text[:15]} duration={seg_duration}")
             temp_files.append(temp_seg_path)
             prev_text = text
             
@@ -120,23 +141,20 @@ def generate_audio_task(job_id: int):
         object_name = f"jobs/{job_id}/audio.wav"
         audio_url = upload_file(temp_out_path, object_name)
         
+        # Update Story record with updated segments containing durations
+        import copy
+        
+        new_annotated = copy.deepcopy(annotated)
+        new_annotated["segments"] = segments
+        story.annotated_content = new_annotated
+        flag_modified(story, "annotated_content")
+        db.add(story)
+        
         # Update Job record
         job.audio_url = audio_url
         job.status = JobStatus.COMPLETED
         db.commit()
         
-        # Cleanup temporary files
-        for f in temp_files:
-            try:
-                os.remove(f)
-            except Exception as e:
-                task_logger.warning(f"Could not remove temp segment file {f}: {e}")
-                
-        try:
-            os.remove(temp_out_path)
-        except Exception as e:
-            task_logger.warning(f"Could not remove temp output file {temp_out_path}: {e}")
-            
         task_logger.info(f"Audio generation job {job_id} completed successfully. URL: {audio_url}")
         return True
         
@@ -151,5 +169,18 @@ def generate_audio_task(job_id: int):
             pass
         return False
     finally:
+        # Cleanup temporary files
+        for f in temp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception as e:
+                task_logger.warning(f"Could not remove temp segment file {f}: {e}")
+                
+        if temp_out_path:
+            try:
+                if os.path.exists(temp_out_path):
+                    os.remove(temp_out_path)
+            except Exception as e:
+                task_logger.warning(f"Could not remove temp output file {temp_out_path}: {e}")
         db.close()
-

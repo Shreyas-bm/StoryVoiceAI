@@ -1,9 +1,4 @@
 fastapi[all]
-SQLAlchemy
-alembic
-psycopg2-binary
-celery
-redis
 minio
 python-multipart
 python-dotenv

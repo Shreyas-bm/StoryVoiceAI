@@ -1,10 +1,12 @@
 """
-NLP Pipeline for StoryVoice AI - Phase 4
+NLP Pipeline for StoryVoice AI - Phase 4 (Launch Ready, From-Scratch Implementation)
 Handles:
-  - Text preprocessing & normalization
-  - Dialogue vs Narration segmentation
-  - Emotion detection per text chunk
-  - Named Entity Recognition (characters)
+  - Text preprocessing & normalization (from scratch)
+  - Dialogue vs Narration segmentation (from scratch)
+  - Emotion detection per text chunk (from-scratch keyword-emotion scoring with negation and intensifiers)
+  - Named Entity Recognition for characters (from-scratch rule-based grammar and attribution extractor)
+
+This implementation is 100% offline, zero-dependency, extremely lightweight, and runs instantly.
 """
 
 import re
@@ -24,55 +26,6 @@ EMOTION_COLOR_MAP = {
     "suspenseful": "#9B59B6",
     "neutral": "#A0A0A0",
 }
-
-# ---------------------------------------------------------------------------
-# Lazy-loaded singletons (only initialised on first call)
-# ---------------------------------------------------------------------------
-_emotion_classifier = None
-_spacy_nlp = None
-
-
-def _get_emotion_classifier():
-    """Load the zero-shot classification model (once)."""
-    global _emotion_classifier
-    if _emotion_classifier is None:
-        try:
-            from transformers import pipeline
-            logger.info("Loading zero-shot emotion classifier …")
-            _emotion_classifier = pipeline(
-                "zero-shot-classification",
-                model="cross-encoder/nli-distilroberta-base",  # ~80 MB, fast on CPU
-            )
-            logger.info("Emotion classifier loaded.")
-        except Exception as exc:
-            logger.warning("Could not load transformers pipeline: %s — using rule-based fallback.", exc)
-            _emotion_classifier = "rule-based"
-    return _emotion_classifier
-
-
-
-def _get_spacy_nlp():
-    """Load a spaCy NLP model for NER (once)."""
-    global _spacy_nlp
-    if _spacy_nlp is None:
-        try:
-            import spacy
-            try:
-                _spacy_nlp = spacy.load("en_core_web_sm")
-            except OSError:
-                logger.warning("spaCy model 'en_core_web_sm' not found — running: python -m spacy download en_core_web_sm")
-                import subprocess, sys
-                subprocess.run(
-                    [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
-                    check=True,
-                )
-                _spacy_nlp = spacy.load("en_core_web_sm")
-            logger.info("spaCy NLP model loaded.")
-        except Exception as exc:
-            logger.warning("spaCy not available: %s — character extraction disabled.", exc)
-            _spacy_nlp = "disabled"
-    return _spacy_nlp
-
 
 # ---------------------------------------------------------------------------
 # 4.2 — Text Preprocessing
@@ -143,99 +96,272 @@ def segment_text(text: str) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 4.4 — Emotion detection
+# 4.4 — Emotion detection (From Scratch Lexicon & Rule-based Model)
 # ---------------------------------------------------------------------------
-_RULE_BASED_KEYWORD_MAP = {
-    "happy": ["laugh", "smile", "joy", "happy", "excit", "cheer", "delight", "grin"],
-    "sad":   ["cry", "tear", "sob", "mourn", "grief", "sorrow", "weep", "sad", "depress"],
-    "angry": ["anger", "furious", "rage", "shout", "scream", "yell", "angry", "mad", "wrath"],
-    "suspenseful": ["dark", "shadow", "creak", "silence", "whisper", "watch", "stalk",
-                    "mystery", "secret", "danger", "threat", "nervous", "tense"],
+EMOTION_LEXICONS = {
+    "happy": [
+        "joy", "joyful", "joyfully", "happy", "happily", "happiness", "laugh", "laughing", "laughed", "laughter", 
+        "smile", "smiled", "smiling", "cheerful", "cheerfully", "delight", "delighted", "delightful", "glad", "gladly", 
+        "grin", "grinned", "grinning", "excited", "exciting", "excitement", "celebrate", "celebrating", "celebrated", 
+        "celebration", "merry", "mirth", "glee", "gleeful", "thrill", "thrilled", "thrilling", "pleased", "pleasant", 
+        "pleasantly", "warm", "warmly", "friendly", "chuckle", "chuckled", "giggle", "giggled", "giggle", "beam", 
+        "beamed", "beaming", "joke", "joked", "joking"
+    ],
+    "sad": [
+        "cry", "crying", "cried", "sob", "sobbing", "sobbed", "tear", "tears", "tearful", "tearfully", "sad", "sadly", 
+        "sadness", "weep", "weeping", "wept", "mourn", "mourning", "mourned", "mournful", "grief", "grieve", "grieving", 
+        "grieved", "sorrow", "sorrowful", "sorrowfully", "depress", "depressed", "depressing", "depression", "despair", 
+        "despairing", "gloom", "gloomy", "gloomily", "unhappy", "miserably", "miserable", "misery", "heartbroke", 
+        "heartbroken", "pity", "pitiful", "lament", "lamenting", "lonely", "loneliness", "sigh", "sighed", "sighing", 
+        "dejected", "hopeless", "helpless", "helplessness"
+    ],
+    "angry": [
+        "anger", "angry", "angrily", "furious", "furiously", "fury", "rage", "raging", "raged", "shout", "shouting", 
+        "shouted", "scream", "screaming", "screamed", "yell", "yelling", "yelled", "mad", "madly", "wrath", "wrathful", 
+        "annoy", "annoyed", "annoying", "irritate", "irritated", "irritating", "irritation", "growl", "growled", 
+        "growling", "snap", "snapped", "snapping", "glare", "glared", "glaring", "bellow", "bellowed", "bellowing", 
+        "hate", "hated", "hating", "hatred", "hiss", "hissed", "hissing", "fume", "fumed", "fuming", "outrage", 
+        "outraged", "outrageous", "bitter", "bitterly", "hostile", "hostility"
+    ],
+    "suspenseful": [
+        "dark", "darkness", "shadow", "shadows", "shadowy", "creak", "creaking", "creaked", "silence", "silent", 
+        "silently", "whisper", "whispering", "whispered", "watch", "watching", "watched", "stalk", "stalking", 
+        "stalked", "mystery", "mysterious", "mysteriously", "secret", "secretive", "secretly", "danger", "dangerous", 
+        "dangerously", "threat", "threaten", "threatening", "threatened", "nervous", "nervously", "nervousness", 
+        "tense", "tension", "fear", "fearful", "fearfully", "feared", "dread", "dreading", "dreaded", "terrify", 
+        "terrifying", "terrified", "terror", "horror", "horrific", "creep", "creepy", "creeped", "creeping", 
+        "ghost", "ghostly", "phantom", "cold", "coldly", "chill", "chilly", "chilling", "shudder", "shuddered", 
+        "shuddering", "tremble", "trembled", "trembling", "shiver", "shivered", "shivering", "panic", "panicked", 
+        "panicking", "hide", "hiding", "hid", "escape", "escaping", "escaped", "lurk", "lurking", "lurked", 
+        "quiet", "quietly", "quietness", "hush", "hushed", "suspicious", "suspiciously", "suspicion", "caution", 
+        "cautious", "cautiously"
+    ]
 }
 
-
-def _rule_based_emotion(text: str) -> str:
-    """Simple keyword-voting fallback for emotion detection."""
-    lower = text.lower()
-    scores: Dict[str, int] = {emotion: 0 for emotion in _RULE_BASED_KEYWORD_MAP}
-    for emotion, keywords in _RULE_BASED_KEYWORD_MAP.items():
-        for kw in keywords:
-            scores[emotion] += lower.count(kw)
-    best = max(scores, key=lambda e: scores[e])
-    return best if scores[best] > 0 else "neutral"
+NEGATIONS = {"not", "no", "never", "without", "barely", "hardly", "none", "neither", "cant", "cannot", "wasnt", "didnt"}
+INTENSIFIERS = {"very", "so", "extremely", "incredibly", "really", "highly", "deeply", "absolutely", "much", "too"}
 
 
 def detect_emotion(text: str) -> str:
     """
-    Classify the dominant emotion of a text chunk.
-    Uses zero-shot transformer model if available, else rule-based.
+    Classify the dominant emotion of a text chunk using a rules-based NLP algorithm from scratch.
+    It evaluates emotional keyword frequencies, negation words, intensifiers, and punctuation cues.
     """
     if not text.strip():
         return "neutral"
 
-    classifier = _get_emotion_classifier()
+    text_lower = text.lower()
+    
+    # Extract words
+    words = re.findall(r'\b[a-z]+\b', text_lower)
+    if not words:
+        return "neutral"
 
-    if classifier == "rule-based":
-        return _rule_based_emotion(text)
+    scores = {emotion: 0.0 for emotion in EMOTION_LEXICONS}
 
-    try:
-        result = classifier(
-            text[:512],  # truncate to avoid token-limit errors
-            candidate_labels=EMOTION_LABELS,
-        )
-        return result["labels"][0]
-    except Exception as exc:
-        logger.warning("Emotion classifier inference failed: %s — using rule-based fallback.", exc)
-        return _rule_based_emotion(text)
+    # Evaluate each word
+    for i, word in enumerate(words):
+        word_emotion = None
+        for emotion, keywords in EMOTION_LEXICONS.items():
+            if word in keywords:
+                word_emotion = emotion
+                break
+        
+        if word_emotion:
+            # Check for negation words in the window preceding the keyword
+            negated = False
+            start_idx = max(0, i - 3)
+            for j in range(start_idx, i):
+                if words[j] in NEGATIONS:
+                    negated = True
+                    break
+            
+            # Check for intensifiers preceding the keyword
+            multiplier = 1.0
+            if i > 0 and words[i-1] in INTENSIFIERS:
+                multiplier = 2.0
+            
+            if negated:
+                # If happy is negated, it counts towards sad
+                if word_emotion == "happy":
+                    scores["sad"] += 1.0 * multiplier
+                else:
+                    # just ignore or reduce other negated emotions
+                    pass
+            else:
+                scores[word_emotion] += 1.0 * multiplier
+
+    # Punctuation and style analysis
+    # Exclamation marks: increase happy/angry scores
+    exclamation_count = text.count("!")
+    if exclamation_count > 0:
+        if scores["angry"] > scores["happy"]:
+            scores["angry"] += 1.5 * exclamation_count
+        elif scores["happy"] > scores["angry"]:
+            scores["happy"] += 1.5 * exclamation_count
+        else:
+            scores["happy"] += 0.5 * exclamation_count
+            scores["angry"] += 0.5 * exclamation_count
+
+    # Ellipsis or dashes: increase suspenseful score
+    ellipsis_count = text.count("...") + text.count("—") + text.count("--")
+    if ellipsis_count > 0:
+        scores["suspenseful"] += 1.0 * ellipsis_count
+
+    # All-caps words (ignoring single letter 'I' or very short words)
+    all_caps_words = [w for w in re.findall(r'\b[A-Z]{2,}\b', text) if w != "OK"]
+    if all_caps_words:
+        if scores["angry"] >= scores["happy"]:
+            scores["angry"] += 1.0 * len(all_caps_words)
+        else:
+            scores["happy"] += 1.0 * len(all_caps_words)
+
+    # Determine highest scoring emotion
+    best_emotion = "neutral"
+    highest_score = 0.0
+    for emotion, score in scores.items():
+        if score > highest_score:
+            highest_score = score
+            best_emotion = emotion
+
+    # Require a minimum score threshold to avoid false positives on short texts
+    if highest_score < 0.2:
+        return "neutral"
+
+    return best_emotion
 
 
 # ---------------------------------------------------------------------------
-# 4.5 — Named Entity Recognition (characters)
+# 4.5 — Named Entity Recognition (characters from scratch)
 # ---------------------------------------------------------------------------
 def extract_characters(text: str) -> List[Dict[str, Any]]:
     """
-    Use spaCy PERSON entities to extract character names from the full story text.
-    Returns a list of unique characters with assigned placeholder voice profiles.
+    Extract character names from the story text using a rules-based NLP algorithm from scratch.
+    It identifies capitalized names, attribution verbs (like 'said', 'whispered'), and title prefixes,
+    excluding common English words.
     """
-    nlp = _get_spacy_nlp()
-
-    if nlp == "disabled":
+    if not text.strip():
         return []
 
-    try:
-        # Process in chunks to stay within spaCy's token limits
-        doc = nlp(text[:100_000])
-        names: Dict[str, int] = {}
-        for ent in doc.ents:
-            if ent.label_ == "PERSON":
-                name = ent.text.strip()
-                names[name] = names.get(name, 0) + 1
+    # Compile list of common English words / stopwords / non-character capitalized words to exclude
+    stopwords = {
+        "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", 
+        "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", 
+        "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves", 
+        "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", 
+        "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", 
+        "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", 
+        "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", 
+        "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", 
+        "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", 
+        "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", 
+        "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", 
+        "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "january", "february", "march", "april", "may", "june", "july", "august", "september",
+        "october", "november", "december", "london", "paris", "new", "york", "mr", "mrs", "ms",
+        "dr", "professor", "sir", "lady", "uncle", "aunt", "yes", "no", "hello", "hi", "oh",
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "first", "second", "third", "morning", "night", "day", "evening", "afternoon",
+        "wood", "forest", "room", "house", "town", "city", "street", "road", "mountain",
+        "river", "lake", "ocean", "sea", "sky", "sun", "moon", "star", "wind", "rain",
+        "shadows", "shadow", "stone", "floor", "storm", "world", "god", "heaven", "hell",
+        "father", "mother", "brother", "sister", "son", "daughter", "friend", "man", "woman",
+        "boy", "girl", "baby", "child", "children", "people", "someone", "anyone", "everyone",
+        "nothing", "something", "anything", "everything", "way", "time", "year", "years"
+    }
 
-        # Build character list sorted by mention frequency (most-mentioned first)
-        sorted_names = sorted(names.items(), key=lambda x: x[1], reverse=True)
+    # Dialogue attribution verbs
+    attribution_verbs = {
+        "said", "whispered", "replied", "asked", "shouted", "yelled", "cried", "muttered", 
+        "thought", "called", "exclaimed", "sighed", "gasped", "groaned", "laughed", "smiled", 
+        "grumbled", "snapped", "whimpered", "stammered", "stutters", "stuttered", "added", 
+        "continued", "began", "murmured", "screamed", "warned", "demanded", "snorted", 
+        "hissed", "growled", "roared", "wept", "sobbed", "chuckle", "chuckled"
+    }
 
-        voice_profiles = [
-            "narrator_warm",
-            "character_deep",
-            "character_light",
-            "character_gruff",
-            "character_soft",
-            "character_energetic",
-        ]
+    # Split text into sentences using simple punctuation splitting
+    sentence_delimiters = re.compile(r'[.!?\n]+')
+    sentences = sentence_delimiters.split(text)
 
-        characters = []
-        for idx, (name, mentions) in enumerate(sorted_names):
-            characters.append({
-                "name": name,
-                "mentions": mentions,
-                "voice_profile": voice_profiles[idx % len(voice_profiles)],
-            })
+    candidate_scores = {}
 
-        return characters
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        
+        # Find words and check capitalization
+        words = re.findall(r'\b[A-Za-z]+\b', sentence)
+        if not words:
+            continue
+            
+        for i, word in enumerate(words):
+            # Check if capitalized and not a stopword (case-insensitive check)
+            if word[0].isupper() and word.lower() not in stopwords:
+                # Is it part of a compound name? (e.g. John Smith)
+                name = word
+                j = i + 1
+                while j < len(words) and words[j][0].isupper() and words[j].lower() not in stopwords:
+                    name += " " + words[j]
+                    j += 1
+                
+                score = 1.0
+                
+                # Check if it is near an attribution verb in the sentence
+                sentence_lower = sentence.lower()
+                for verb in attribution_verbs:
+                    # Look for "[Name] said" or "said [Name]"
+                    if re.search(r'\b' + re.escape(name.lower()) + r'\s+(?:\w+\s+){0,2}' + re.escape(verb) + r'\b', sentence_lower) or \
+                       re.search(r'\b' + re.escape(verb) + r'\s+(?:\w+\s+){0,2}' + re.escape(name.lower()) + r'\b', sentence_lower):
+                        score += 15.0
+                
+                # Check if preceded by a title prefix
+                if i > 0 and words[i-1].lower() in {"mr", "mrs", "ms", "dr", "professor", "sir", "lady", "uncle", "aunt"}:
+                    score += 10.0
+                    
+                # If it's the very first word in the sentence, give it lower confidence unless boosted
+                if i == 0 and score == 1.0:
+                    score = 0.2
+                    
+                candidate_scores[name] = candidate_scores.get(name, 0.0) + score
 
-    except Exception as exc:
-        logger.warning("NER extraction failed: %s", exc)
-        return []
+    # Filter out candidates with low score or very short names
+    filtered_candidates = {}
+    for name, score in candidate_scores.items():
+        name_clean = name.strip()
+        if len(name_clean) < 2:
+            continue
+        # If the name is composed of words that are all stopwords, skip
+        words_in_name = name_clean.split()
+        if all(w.lower() in stopwords for w in words_in_name):
+            continue
+            
+        # Require a minimum score threshold
+        if score >= 1.0:
+            filtered_candidates[name_clean] = score
+
+    # Sort candidates by score descending
+    sorted_candidates = sorted(filtered_candidates.items(), key=lambda x: x[1], reverse=True)
+    
+    # Map to voice profiles
+    voice_profiles = [
+        "character_deep",
+        "character_light",
+        "character_gruff",
+        "character_soft",
+        "character_energetic",
+    ]
+    
+    characters = []
+    for idx, (name, score) in enumerate(sorted_candidates[:6]): # Limit to top 6 characters
+        characters.append({
+            "name": name,
+            "mentions": int(score),
+            "voice_profile": voice_profiles[idx % len(voice_profiles)]
+        })
+        
+    return characters
 
 
 # ---------------------------------------------------------------------------

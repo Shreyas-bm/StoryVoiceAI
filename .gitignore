@@ -1,0 +1,53 @@
+# Python virtual environments
+backend/venv/
+backend/.venv/
+venv/
+.venv/
+env/
+.env/
+
+# Python cache & temporary files
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+.pytest_cache/
+.cache/
+backend/.cache/
+
+# Databases
+*.db
+backend/storyvoice.db
+test_storyvoice.db
+
+# Storage fallback folder (MinIO/Local storage files)
+backend/storage/
+storage/
+
+# ONNX model files
+backend/onnx/
+*.onnx
+
+# Local environment configuration (keep credentials local)
+.env
+backend/.env
+frontend/.env.local
+.env.local
+.env.*.local
+
+# IDE configurations
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Frontend build and dependencies
+frontend/node_modules/
+frontend/.next/
+frontend/out/

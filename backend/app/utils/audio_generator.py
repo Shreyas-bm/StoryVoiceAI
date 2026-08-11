@@ -15,6 +15,8 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
     """
     Procedural audio speech generator (chiptune/synthesizer style) with a pyttsx3 spoken speech optimizer.
     Generates spoken audio on supported systems, and falls back to chiptune waves on unsupported systems.
+    
+    Emotional swings in pitch/speed are disabled to maintain a clean, professional, and consistent audiobook narration.
     """
     logger.info(f"Synthesizing segment: '{text[:30]}...' with profile={voice_profile}, emotion={emotion}")
     
@@ -25,41 +27,45 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
         engine = pyttsx3.init()
         voices = engine.getProperty("voices")
         
-        # Select voice based on profile
+        # Select voice and base rate based on profile to create different character voices
         selected_voice_id = None
-        if "light" in voice_profile or "soft" in voice_profile or "female" in voice_profile:
+        base_rate = 160
+        
+        if "female" in voice_profile or "light" in voice_profile or "soft" in voice_profile:
+            # Female Voice (Zira)
             for v in voices:
                 if "zira" in v.name.lower():
                     selected_voice_id = v.id
                     break
+            
+            if "light" in voice_profile:
+                base_rate = 175
+            elif "soft" in voice_profile:
+                base_rate = 150
+            else:
+                base_rate = 160
         else:
+            # Male Voice (David)
             for v in voices:
                 if "david" in v.name.lower():
                     selected_voice_id = v.id
                     break
-                    
+            
+            if "deep" in voice_profile:
+                base_rate = 145
+            elif "gruff" in voice_profile:
+                base_rate = 135
+            elif "energetic" in voice_profile:
+                base_rate = 185
+            else:
+                base_rate = 160
+                
         if selected_voice_id:
             engine.setProperty("voice", selected_voice_id)
             
-        # Select speech rate based on emotion
-        rate = 180
-        if emotion == "happy":
-            rate = 210
-        elif emotion == "sad":
-            rate = 145
-        elif emotion == "angry":
-            rate = 220
-        elif emotion == "suspenseful":
-            rate = 150
-        engine.setProperty("rate", rate)
-        
-        # Select volume based on emotion
-        volume = 1.0
-        if emotion == "sad":
-            volume = 0.75
-        elif emotion == "suspenseful":
-            volume = 0.65
-        engine.setProperty("volume", volume)
+        # Ignore emotional speed/pitch changes as requested (neutral storytelling)
+        engine.setProperty("rate", base_rate)
+        engine.setProperty("volume", 1.0)
         
         # Ensure output directory exists
         dir_name = os.path.dirname(output_path)
@@ -79,45 +85,55 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
     except Exception as exc:
         logger.warning(f"pyttsx3 speech synthesis failed: {exc}. Falling back to chiptune generator.")
     
-    # Base frequency/pitch based on voice profile
+    # --- Chiptune Fallback Synthesizer (Zero-Dependency) ---
+    # Define distinct base configurations per character voice profile
     base_freq = 180.0
-    if "deep" in voice_profile or "gruff" in voice_profile:
-        base_freq = 95.0
-    elif "light" in voice_profile or "soft" in voice_profile:
-        base_freq = 270.0
-    elif "energetic" in voice_profile:
-        base_freq = 210.0
-        
-    # Emotion multipliers
-    speed_modifier = 1.0
-    pitch_modifier = 1.0
+    wave_type = "sine"
     vibrato_freq = 0.0
     vibrato_amp = 0.0
-    noise_volume = 0.04
-    wave_type = "sine"
+    speed_modifier = 1.0
     
-    if emotion == "happy":
-        pitch_modifier = 1.15
-        speed_modifier = 1.25
-        vibrato_freq = 6.0
-        vibrato_amp = 12.0
-    elif emotion == "sad":
-        pitch_modifier = 0.82
-        speed_modifier = 0.75
-        vibrato_freq = 2.5
-        vibrato_amp = 4.0
-        noise_volume = 0.02
-    elif emotion == "angry":
-        pitch_modifier = 1.3
-        speed_modifier = 1.3
-        noise_volume = 0.12
+    if "deep" in voice_profile:
+        base_freq = 95.0
+        wave_type = "sine"
+        speed_modifier = 0.9
+    elif "gruff" in voice_profile:
+        base_freq = 80.0
         wave_type = "square"
-    elif emotion == "suspenseful":
-        pitch_modifier = 0.75
+        vibrato_freq = 3.0
+        vibrato_amp = 3.0
         speed_modifier = 0.8
-        noise_volume = 0.08
+    elif "light" in voice_profile:
+        base_freq = 270.0
+        wave_type = "sine"
+        vibrato_freq = 5.0
+        vibrato_amp = 8.0
+        speed_modifier = 1.1
+    elif "soft" in voice_profile:
+        base_freq = 220.0
         wave_type = "triangle"
+        vibrato_freq = 4.0
+        vibrato_amp = 5.0
+        speed_modifier = 0.95
+    elif "energetic" in voice_profile:
+        base_freq = 210.0
+        wave_type = "sine"
+        vibrato_freq = 7.0
+        vibrato_amp = 15.0
+        speed_modifier = 1.25
+    elif "female" in voice_profile: # narrator_female
+        base_freq = 200.0
+        wave_type = "sine"
+        speed_modifier = 1.0
+    else: # narrator_male or default
+        base_freq = 140.0
+        wave_type = "sine"
+        speed_modifier = 1.0
         
+    # Ignore emotional modifiers as requested (neutral storytelling)
+    pitch_modifier = 1.0
+    noise_volume = 0.04
+    
     # Sound durations for different types of characters
     char_duration = 0.045 / speed_modifier
     vowel_duration = 0.06 / speed_modifier
@@ -247,10 +263,10 @@ def concatenate_wav_files(input_files: List[str], output_file: str):
                 out_file.writeframes(in_file.readframes(in_file.getnframes()))
 
 
-def get_voice_profile_for_segment(segment: Dict[str, Any], characters: List[Dict[str, Any]], prev_text: str = "") -> str:
+def get_voice_profile_for_segment(segment: Dict[str, Any], characters: List[Dict[str, Any]], prev_text: str = "", narrator_voice: str = "warm") -> str:
     """Helper to determine the best voice profile for a text segment."""
     if segment.get("type") == "narration":
-        return "narrator_warm"
+        return f"narrator_{narrator_voice}"
         
     text = segment.get("text", "").lower()
     combined_context = (text + " " + prev_text).lower()
@@ -262,7 +278,7 @@ def get_voice_profile_for_segment(segment: Dict[str, Any], characters: List[Dict
             return char.get("voice_profile", "character_light")
             
     # Try to find a character profile that isn't the narrator
-    char_profiles = [c.get("voice_profile") for c in characters if c.get("voice_profile") != "narrator_warm"]
+    char_profiles = [c.get("voice_profile") for c in characters if c.get("voice_profile") not in ("narrator_warm", "narrator_male", "narrator_female")]
     if char_profiles:
         return char_profiles[0]
         

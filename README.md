@@ -67,5 +67,4 @@ StoryVoice AI is an advanced, offline-capable multi-voice audiobook generator. I
 └── docker-compose.yml             # Orchestration for PostgreSQL, Redis, and MinIO
 ```
 
----
-```
+

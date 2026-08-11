@@ -30,6 +30,7 @@ interface Segment {
   text: string;
   emotion: string;
   color: string;
+  duration?: number;
 }
 
 interface Character {
@@ -75,6 +76,7 @@ export default function Home() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioJobId, setAudioJobId] = useState<number | null>(null);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [narratorVoice, setNarratorVoice] = useState<"male" | "female">("male");
   
   // Custom Audio Player States
   const [isPlaying, setIsPlaying] = useState(false);
@@ -136,6 +138,15 @@ export default function Home() {
             } else {
               setErrorMessage("NLP analysis failed.");
             }
+          }
+        } else {
+          // If status is 404 or any other error, stop polling
+          clearInterval(interval);
+          setIsAnalyzing(false);
+          if (res.status === 404) {
+            setErrorMessage("Story not found. The server may have restarted.");
+          } else {
+            setErrorMessage("Failed to fetch story analysis.");
           }
         }
       } catch (err) {
@@ -220,6 +231,18 @@ export default function Home() {
               setErrorMessage("Audiobook generation failed.");
             }
           }
+        } else {
+          // If status is 404 or any other error, stop polling
+          if (audioIntervalRef.current) {
+            clearInterval(audioIntervalRef.current);
+            audioIntervalRef.current = null;
+          }
+          setAudioStatus("failed");
+          if (res.status === 404) {
+            setErrorMessage("Story not found. The server may have restarted.");
+          } else {
+            setErrorMessage("Failed to fetch audio status.");
+          }
         }
       } catch (err) {
         console.error("Error polling audio status:", err);
@@ -249,6 +272,10 @@ export default function Home() {
         if (data.status === "pending" || data.status === "processing") {
           pollAudioStatus(storyId);
         }
+      } else {
+        setAudioStatus("none");
+        setAudioUrl(null);
+        setAudioJobId(null);
       }
     } catch (err) {
       console.error("Failed to fetch audio status:", err);
@@ -276,7 +303,7 @@ export default function Home() {
     setAudioStatus("pending");
     
     try {
-      const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/generate-audio`, {
+      const res = await fetch(`${API_BASE_URL}/api/stories/${storyId}/generate-audio?narrator_voice=${narratorVoice}`, {
         method: "POST",
       });
       
@@ -364,6 +391,58 @@ export default function Home() {
     setPlaybackRate(nextRate);
     audioRef.current.playbackRate = nextRate;
   };
+
+  // Find active segment based on current audio playback time
+  const getActiveSegmentIndex = () => {
+    if (!selectedStory || !selectedStory.annotated_content || audioStatus !== "completed") return -1;
+    const segments = selectedStory.annotated_content.segments;
+    let accumulatedTime = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const segDuration = segments[i].duration || 0;
+      if (currentTime >= accumulatedTime && currentTime < accumulatedTime + segDuration) {
+        return i;
+      }
+      accumulatedTime += segDuration;
+    }
+    // Fallback: if currentTime is at/near the very end
+    if (currentTime >= accumulatedTime && segments.length > 0 && accumulatedTime > 0) {
+      return segments.length - 1;
+    }
+    return -1;
+  };
+  
+  const activeSegmentIndex = getActiveSegmentIndex();
+
+  // Handle clicking a segment to seek to its start time
+  const handleSegmentClick = (idx: number) => {
+    if (!selectedStory || !selectedStory.annotated_content || !audioRef.current || audioStatus !== "completed") return;
+    const segments = selectedStory.annotated_content.segments;
+    let targetTime = 0;
+    for (let i = 0; i < idx; i++) {
+      targetTime += segments[i].duration || 0;
+    }
+    audioRef.current.currentTime = targetTime;
+    setCurrentTime(targetTime);
+    if (!isPlaying) {
+      audioRef.current.play().catch(err => {
+        console.error("Playback failed after seeking segment:", err);
+      });
+      setIsPlaying(true);
+    }
+  };
+
+  // Auto-scroll active segment into view
+  useEffect(() => {
+    if (activeSegmentIndex !== -1) {
+      const activeEl = document.getElementById(`segment-${activeSegmentIndex}`);
+      if (activeEl) {
+        activeEl.scrollIntoView({
+          behavior: "smooth",
+          block: "nearest",
+        });
+      }
+    }
+  }, [activeSegmentIndex]);
 
   // Reset audio states and poll when story changes
   useEffect(() => {
@@ -531,168 +610,172 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0B0B0F] text-zinc-100 flex flex-col font-sans selection:bg-[#7C5CFF]/30 selection:text-white">
-      {/* Background glow effects */}
-      <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-[#7C5CFF]/10 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-10 right-1/4 w-[400px] h-[400px] bg-[#00D4FF]/5 rounded-full blur-[100px] pointer-events-none" />
+    <div className="min-h-screen bg-[#0A0E17] text-zinc-100 flex flex-col font-sans selection:bg-[#8B5CF6]/30 selection:text-white relative overflow-hidden">
+      {/* Soft background glow effects */}
+      <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-[#8B5CF6]/5 rounded-full blur-[140px] pointer-events-none" />
+      <div className="absolute -bottom-40 left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-[#00D4FF]/3 rounded-full blur-[120px] pointer-events-none" />
 
       {/* Top Header */}
-      <header className="border-b border-[#1E1E2A] bg-[#0B0B0F]/80 backdrop-blur-md sticky top-0 z-50 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center space-x-3 group">
-            <div className="p-2.5 bg-gradient-to-tr from-[#7C5CFF] to-[#00D4FF] rounded-xl shadow-lg shadow-[#7C5CFF]/20 group-hover:scale-105 transition-transform duration-300">
-              <Music className="w-5 h-5 text-white" />
+      <header className="border-b border-white/5 bg-[#0A0E17]/60 backdrop-blur-md sticky top-0 z-50 px-4 sm:px-6 py-4">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div className="flex items-center space-x-3 group cursor-pointer" onClick={() => setSelectedStory(null)}>
+            <div className="p-2 bg-[#8B5CF6]/10 border border-[#8B5CF6]/20 rounded-xl transition-all duration-300">
+              <Headphones className="w-5 h-5 text-[#A78BFA]" />
             </div>
             <div>
-              <h1 className="font-bold text-xl tracking-tight bg-gradient-to-r from-white via-zinc-100 to-zinc-400 bg-clip-text text-transparent">
-                StoryVoice <span className="text-[#7C5CFF]">AI</span>
+              <h1 className="font-bold text-lg tracking-tight text-white">
+                StoryVoice <span className="text-[#8B5CF6]">AI</span>
               </h1>
-              <p className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider">Multi-Voice Story Generation</p>
+              <p className="text-[9px] text-zinc-500 font-semibold uppercase tracking-wider">Minimal Podcast Editor</p>
             </div>
           </div>
           <div className="flex items-center space-x-4">
-            <span className="text-xs bg-[#12121A] border border-[#1E1E2A] px-3 py-1.5 rounded-full text-zinc-400 flex items-center space-x-1.5">
+            <span className="text-[11px] bg-[#111827]/80 border border-white/5 px-3 py-1.5 rounded-full text-zinc-400 flex items-center space-x-1.5 shadow-sm">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Local Pipeline Running</span>
+              <span className="font-medium">Active</span>
             </span>
           </div>
         </div>
       </header>
 
       {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 md:py-10 grid grid-cols-1 lg:grid-cols-12 gap-8 z-10">
+      <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6 md:py-12 z-10 flex flex-col justify-center space-y-8">
         
-        {/* Left Side: Create / Import Story (8 cols on desktop) */}
-        <section className="lg:col-span-7 flex flex-col space-y-6">
-          <div className="space-y-2">
-            <h2 className="text-3xl font-bold tracking-tight text-white flex items-center gap-2">
-              Generate Audiobooks <Sparkles className="w-6 h-6 text-[#A78BFA] animate-pulse" />
-            </h2>
-            <p className="text-zinc-400 text-sm md:text-base">
-              Enter your story or upload a document to analyze emotional tones and render character-specific narrations.
-            </p>
+        {/* Story Selector / Library Panel */}
+        <div className="flex flex-col sm:flex-row justify-between sm:items-center bg-[#111827]/40 border border-white/5 rounded-2xl p-4 backdrop-blur-md gap-3 shadow-lg shadow-black/10">
+          <div>
+            <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider block">Selected Story</span>
+            <span className="text-[10px] text-zinc-500">Pick an existing story or write a new one</span>
           </div>
+          <div className="flex items-center space-x-2">
+            <select
+              value={selectedStory?.id || ""}
+              onChange={(e) => {
+                if (e.target.value === "") {
+                  setSelectedStory(null);
+                } else {
+                  const story = stories.find(s => s.id === Number(e.target.value));
+                  if (story) setSelectedStory(story);
+                }
+              }}
+              className="bg-[#111827] border border-white/10 text-zinc-200 text-xs font-semibold rounded-xl px-4 py-2.5 focus:outline-none focus:border-[#8B5CF6] cursor-pointer max-w-[220px] transition-colors"
+            >
+              <option value="">+ Write New Story</option>
+              {stories.map(s => (
+                <option key={s.id} value={s.id}>{s.title}</option>
+              ))}
+            </select>
+          </div>
+        </div>
 
-          {/* Form Card */}
-          <div className="bg-[#12121A] border border-[#1E1E2A] rounded-2xl p-6 shadow-2xl relative overflow-hidden transition-all duration-300 hover:border-[#7C5CFF]/20">
-            {/* Glow Border Effect */}
-            <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-[#7C5CFF] via-[#A78BFA] to-[#00D4FF]" />
-            
-            {/* Tab Selectors */}
-            <div className="flex border-b border-[#1E1E2A] mb-6">
-              <button
-                type="button"
-                onClick={() => { setActiveTab("write"); setErrorMessage(null); }}
-                className={`pb-3 px-4 font-semibold text-sm transition-all relative ${
-                  activeTab === "write" 
-                    ? "text-[#7C5CFF]" 
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                Write / Paste Content
-                {activeTab === "write" && (
-                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#7C5CFF]" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setActiveTab("upload"); setErrorMessage(null); }}
-                className={`pb-3 px-4 font-semibold text-sm transition-all relative ${
-                  activeTab === "upload" 
-                    ? "text-[#7C5CFF]" 
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                Upload File (PDF/DOCX/TXT)
-                {activeTab === "upload" && (
-                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#7C5CFF]" />
-                )}
-              </button>
+        {/* Dynamic Card Display */}
+        {!selectedStory ? (
+          /* STORY CREATION CARD (Centered Input Area) */
+          <div className="bg-[#111827]/60 border border-white/5 rounded-3xl p-6 sm:p-8 shadow-2xl relative backdrop-blur-md flex flex-col space-y-6">
+            <div className="flex justify-between items-center border-b border-white/5 pb-4">
+              <div className="flex bg-[#0A0E17] p-1 rounded-xl border border-white/5">
+                <button
+                  type="button"
+                  onClick={() => { setActiveTab("write"); setErrorMessage(null); }}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    activeTab === "write" ? "bg-[#8B5CF6] text-white shadow-sm" : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  Write Content
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setActiveTab("upload"); setErrorMessage(null); }}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    activeTab === "upload" ? "bg-[#8B5CF6] text-white shadow-sm" : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  Upload File
+                </button>
+              </div>
+              <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold">New Audiobook</span>
             </div>
 
-            {/* Error & Success Messages */}
             {errorMessage && (
-              <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-center space-x-2">
+              <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-center space-x-2">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>{errorMessage}</span>
               </div>
             )}
             {successMessage && (
-              <div className="mb-4 p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl flex items-center space-x-2">
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl flex items-center space-x-2">
                 <Check className="w-4 h-4 shrink-0" />
                 <span>{successMessage}</span>
               </div>
             )}
 
-            {/* Forms */}
             {activeTab === "write" ? (
-              <form onSubmit={handleSubmitStory} className="space-y-4">
-                <div className="space-y-1.5">
-                  <label htmlFor="write-title" className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Story Title</label>
+              <form onSubmit={handleSubmitStory} className="space-y-6">
+                <div className="space-y-2">
+                  <label htmlFor="write-title" className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Story Title</label>
                   <input
                     id="write-title"
                     type="text"
-                    placeholder="Enter the title of your story..."
+                    placeholder="E.g., The Midnight Whispers"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     disabled={isSubmitting}
-                    className="w-full bg-[#0B0B0F] border border-[#1E1E2A] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#7C5CFF] focus:ring-1 focus:ring-[#7C5CFF] text-zinc-100 placeholder-zinc-600 transition-all duration-200"
+                    className="w-full bg-[#0A0E17] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#8B5CF6] focus:ring-1 focus:ring-[#8B5CF6] text-zinc-100 placeholder-zinc-600 transition-all duration-200"
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label htmlFor="write-content" className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Story Content</label>
+                <div className="space-y-2">
+                  <label htmlFor="write-content" className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Story Content</label>
                   <textarea
                     id="write-content"
-                    placeholder="Paste or write your story paragraphs here. Use quotation marks for dialogues to help the AI detect characters..."
+                    placeholder="Write or paste your paragraphs here. Dialogues with quotes are automatically detected."
                     value={content}
                     onChange={(e) => setContent(e.target.value)}
                     disabled={isSubmitting}
                     rows={8}
-                    className="w-full bg-[#0B0B0F] border border-[#1E1E2A] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#7C5CFF] focus:ring-1 focus:ring-[#7C5CFF] text-zinc-100 placeholder-zinc-600 transition-all duration-200 resize-y min-h-[160px]"
+                    className="w-full bg-[#0A0E17] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#8B5CF6] focus:ring-1 focus:ring-[#8B5CF6] text-zinc-100 placeholder-zinc-600 transition-all duration-200 resize-none min-h-[180px] leading-relaxed"
                   />
                 </div>
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="w-full bg-gradient-to-r from-[#7C5CFF] to-[#A78BFA] hover:from-[#6b4ae6] hover:to-[#9675e8] active:scale-[0.98] text-white font-semibold py-3 rounded-xl transition-all duration-200 shadow-lg shadow-[#7C5CFF]/20 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
+                  className="w-full bg-[#8B5CF6] hover:bg-[#7c4dff] active:scale-[0.98] text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-[#8B5CF6]/10 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer text-sm"
                 >
                   {isSubmitting ? (
                     <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>Creating Story...</span>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Extracting Content...</span>
                     </>
                   ) : (
                     <>
-                      <Sparkles className="w-5 h-5" />
-                      <span>Save and Extract Story</span>
+                      <Sparkles className="w-4 h-4" />
+                      <span>Load and Parse Story</span>
                     </>
                   )}
                 </button>
               </form>
             ) : (
-              <form onSubmit={handleUploadStory} className="space-y-4">
-                <div className="space-y-1.5">
-                  <label htmlFor="upload-title" className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Story Title (Optional)</label>
+              <form onSubmit={handleUploadStory} className="space-y-6">
+                <div className="space-y-2">
+                  <label htmlFor="upload-title" className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Story Title (Optional)</label>
                   <input
                     id="upload-title"
                     type="text"
-                    placeholder="Determined from file name if left blank..."
+                    placeholder="Determined from filename if left blank..."
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     disabled={isSubmitting}
-                    className="w-full bg-[#0B0B0F] border border-[#1E1E2A] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#7C5CFF] focus:ring-1 focus:ring-[#7C5CFF] text-zinc-100 placeholder-zinc-600 transition-all duration-200"
+                    className="w-full bg-[#0A0E17] border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#8B5CF6] focus:ring-1 focus:ring-[#8B5CF6] text-zinc-100 placeholder-zinc-600 transition-all duration-200"
                   />
                 </div>
                 
-                {/* Drag and Drop Dropzone */}
-                <div className="space-y-1.5">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Upload Document</span>
+                <div className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Upload Document</span>
                   <div
                     onClick={() => !isSubmitting && fileInputRef.current?.click()}
-                    className={`w-full border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all duration-200 ${
+                    className={`w-full border border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all duration-200 ${
                       selectedFile 
-                        ? "border-[#7C5CFF]/70 bg-[#7C5CFF]/5" 
-                        : "border-[#1E1E2A] bg-[#0B0B0F] hover:border-[#7C5CFF]/40"
+                        ? "border-[#8B5CF6]/70 bg-[#8B5CF6]/5" 
+                        : "border-white/5 bg-[#0A0E17] hover:border-[#8B5CF6]/40"
                     } ${isSubmitting ? "opacity-50 pointer-events-none" : ""}`}
                   >
                     <input
@@ -705,14 +788,14 @@ export default function Home() {
                     
                     {selectedFile ? (
                       <div className="text-center space-y-2">
-                        <div className="mx-auto w-12 h-12 rounded-full bg-[#7C5CFF]/15 flex items-center justify-center text-[#7C5CFF] animate-bounce">
-                          <FileUp className="w-6 h-6" />
+                        <div className="mx-auto w-10 h-10 rounded-full bg-[#8B5CF6]/15 flex items-center justify-center text-[#8B5CF6]">
+                          <FileUp className="w-5 h-5" />
                         </div>
                         <div>
-                          <p className="text-sm font-semibold text-zinc-200 truncate max-w-[300px]">
+                          <p className="text-xs font-semibold text-zinc-200 truncate max-w-[260px]">
                             {selectedFile.name}
                           </p>
-                          <p className="text-xs text-zinc-500">
+                          <p className="text-[10px] text-zinc-500">
                             {(selectedFile.size / 1024).toFixed(1)} KB
                           </p>
                         </div>
@@ -723,7 +806,7 @@ export default function Home() {
                             setSelectedFile(null);
                             if (fileInputRef.current) fileInputRef.current.value = "";
                           }}
-                          className="text-xs text-red-400 hover:text-red-300 font-medium underline inline-flex items-center space-x-1"
+                          className="text-[10px] text-red-400 hover:text-red-300 font-semibold underline inline-flex items-center space-x-1"
                         >
                           <Trash2 className="w-3 h-3" />
                           <span>Remove</span>
@@ -731,15 +814,15 @@ export default function Home() {
                       </div>
                     ) : (
                       <div className="text-center space-y-3">
-                        <div className="mx-auto w-12 h-12 rounded-full bg-[#1E1E2A] flex items-center justify-center text-zinc-400">
-                          <UploadCloud className="w-6 h-6" />
+                        <div className="mx-auto w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-zinc-400">
+                          <UploadCloud className="w-5 h-5" />
                         </div>
                         <div>
-                          <p className="text-sm font-medium text-zinc-300">
-                            Drag & drop your file or <span className="text-[#7C5CFF] underline">browse</span>
+                          <p className="text-xs font-medium text-zinc-300">
+                            Drag & drop or <span className="text-[#8B5CF6] underline">browse</span>
                           </p>
-                          <p className="text-xs text-zinc-500 mt-1">
-                            Supports PDF, DOCX, and TXT (Max 10MB)
+                          <p className="text-[10px] text-zinc-500 mt-1">
+                            Supports PDF, DOCX, TXT
                           </p>
                         </div>
                       </div>
@@ -750,410 +833,398 @@ export default function Home() {
                 <button
                   type="submit"
                   disabled={isSubmitting || !selectedFile}
-                  className="w-full bg-gradient-to-r from-[#7C5CFF] to-[#00D4FF] hover:from-[#6b4ae6] hover:to-[#00b2d6] active:scale-[0.98] text-white font-semibold py-3 rounded-xl transition-all duration-200 shadow-lg shadow-[#7C5CFF]/20 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
+                  className="w-full bg-[#8B5CF6] hover:bg-[#7c4dff] active:scale-[0.98] text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-[#8B5CF6]/10 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer text-sm"
                 >
                   {isSubmitting ? (
                     <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>Parsing & Importing Document...</span>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Parsing Document...</span>
                     </>
                   ) : (
                     <>
-                      <FileText className="w-5 h-5" />
-                      <span>Parse and Load Story</span>
+                      <FileText className="w-4 h-4" />
+                      <span>Load and Parse Story</span>
                     </>
                   )}
                 </button>
               </form>
             )}
           </div>
-        </section>
-
-        {/* Right Side: Saved Stories & Story Preview (5 cols on desktop) */}
-        <section className="lg:col-span-5 flex flex-col space-y-6">
-          <div className="space-y-2">
-            <h3 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-              <BookOpen className="w-5 h-5 text-[#7C5CFF]" /> Saved Stories
-            </h3>
-            <p className="text-zinc-500 text-xs">
-              Select an uploaded story from your local library to view details and parsed content.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6">
-            {/* Story List Card */}
-            <div className="bg-[#12121A] border border-[#1E1E2A] rounded-2xl p-4 shadow-xl max-h-[300px] overflow-y-auto custom-scrollbar">
-              {isLoadingStories ? (
-                <div className="py-12 flex flex-col items-center justify-center text-zinc-500 space-y-2 text-sm">
-                  <Loader2 className="w-6 h-6 animate-spin text-[#7C5CFF]" />
-                  <span>Loading library...</span>
-                </div>
-              ) : stories.length === 0 ? (
-                <div className="py-12 text-center text-zinc-500 text-sm">
-                  <BookOpen className="w-8 h-8 mx-auto mb-2 text-zinc-600 opacity-60" />
-                  <span>Your library is empty. Upload your first story!</span>
-                </div>
-              ) : (
-                <div className="space-y-1.5">
-                  {stories.map((story) => (
-                    <button
-                      key={story.id}
-                      onClick={() => setSelectedStory(story)}
-                      className={`w-full text-left p-3 rounded-xl transition-all duration-200 flex items-center justify-between group ${
-                        selectedStory?.id === story.id 
-                          ? "bg-[#7C5CFF]/10 border border-[#7C5CFF]/30 text-white" 
-                          : "border border-transparent text-zinc-400 hover:bg-[#1A1A24] hover:text-zinc-200"
-                      }`}
-                    >
-                      <div className="truncate pr-4 flex-1">
-                        <p className="font-semibold text-sm truncate">{story.title}</p>
-                        <p className="text-[10px] text-zinc-500 mt-0.5">
-                          {new Date(story.created_at).toLocaleDateString(undefined, {
-                            month: "short",
-                            day: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit"
-                          })}
-                        </p>
-                      </div>
-                      <ChevronRight className={`w-4 h-4 shrink-0 transition-transform ${
-                        selectedStory?.id === story.id 
-                          ? "text-[#7C5CFF] translate-x-1" 
-                          : "text-zinc-600 group-hover:text-zinc-400 group-hover:translate-x-0.5"
-                      }`} />
-                    </button>
-                  ))}
-                </div>
+        ) : (
+          /* STORY PREVIEW & AUDIO PLAYER CARD (Premium layout, waveforms, play buttons) */
+          <div className="bg-[#111827]/60 border border-white/5 rounded-3xl p-6 sm:p-8 shadow-2xl relative backdrop-blur-md flex flex-col space-y-6">
+            
+            {/* Header info */}
+            <div className="flex justify-between items-start border-b border-white/5 pb-4">
+              <div>
+                <h2 className="text-xl font-bold text-white tracking-tight">{selectedStory.title}</h2>
+                <p className="text-[10px] text-zinc-500 mt-1 uppercase tracking-wider font-semibold">
+                  {selectedStory.nlp_status === "completed" 
+                    ? `Narrative Analyzed (${selectedStory.content.length} chars)` 
+                    : `Text Loaded (${selectedStory.content.length} chars)`}
+                </p>
+              </div>
+              {selectedStory.nlp_status && (
+                <span className={`text-[9px] font-bold uppercase px-2.5 py-1 rounded-full border tracking-wider ${
+                  selectedStory.nlp_status === "completed"
+                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                    : selectedStory.nlp_status === "processing"
+                    ? "bg-amber-500/10 border-amber-500/20 text-amber-400 animate-pulse"
+                    : selectedStory.nlp_status === "failed"
+                    ? "bg-red-500/10 border-red-500/20 text-red-400"
+                    : "bg-zinc-500/10 border-zinc-500/20 text-zinc-400"
+                }`}>
+                  {selectedStory.nlp_status}
+                </span>
               )}
             </div>
 
-            {/* Selected Story Preview */}
-            <div className="bg-[#12121A] border border-[#1E1E2A] rounded-2xl p-6 shadow-xl flex-1 flex flex-col min-h-[350px]">
-              {selectedStory ? (
-                <div className="flex flex-col h-full space-y-4">
-                  <div className="border-b border-[#1E1E2A] pb-3 flex justify-between items-start">
+            {errorMessage && (
+              <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+            {successMessage && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl flex items-center space-x-2">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>{successMessage}</span>
+              </div>
+            )}
+
+            {/* Story Text Box / Reader */}
+            {selectedStory.nlp_status === "processing" ? (
+              <div className="flex flex-col items-center justify-center py-12 space-y-4">
+                <Loader2 className="w-8 h-8 animate-spin text-[#8B5CF6]" />
+                <div className="space-y-1 text-center">
+                  <p className="text-sm font-semibold text-zinc-200">Analyzing story narrative</p>
+                  <p className="text-xs text-zinc-500 max-w-[280px]">
+                    Splitting paragraphs, mapping emotional tones, and identifying characters...
+                  </p>
+                </div>
+              </div>
+            ) : selectedStory.nlp_status === "completed" && selectedStory.annotated_content ? (
+              <div className="space-y-4">
+                {/* Options panel: Voice selector & toggle highlights */}
+                <div className="space-y-3">
+                  {/* Voice Selector */}
+                  <div className="flex items-center justify-between bg-[#0A0E17]/60 border border-white/5 p-3 rounded-2xl">
                     <div>
-                      <h4 className="font-bold text-base text-zinc-100">{selectedStory.title}</h4>
-                      <p className="text-[10px] text-zinc-500 mt-1 uppercase tracking-wider">
-                        {selectedStory.nlp_status === "completed" 
-                          ? `Analyzed Story (${selectedStory.content.length} characters)` 
-                          : `Extracted text (${selectedStory.content.length} characters)`}
-                      </p>
+                      <span className="text-xs font-bold text-zinc-300 uppercase tracking-wider block">Narrator Voice</span>
+                      <span className="text-[9px] text-zinc-500">Pick narrator gender profile</span>
                     </div>
-                    {selectedStory.nlp_status && (
-                      <span className={`text-[10px] font-semibold uppercase px-2.5 py-1 rounded-full border ${
-                        selectedStory.nlp_status === "completed"
-                          ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-                          : selectedStory.nlp_status === "processing"
-                          ? "bg-amber-500/10 border-amber-500/30 text-amber-400 animate-pulse"
-                          : selectedStory.nlp_status === "failed"
-                          ? "bg-red-500/10 border-red-500/30 text-red-400"
-                          : "bg-zinc-500/10 border-zinc-500/30 text-zinc-400"
-                      }`}>
-                        {selectedStory.nlp_status}
-                      </span>
-                    )}
+                    <div className="flex bg-[#111827] p-0.5 rounded-lg border border-white/10 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setNarratorVoice("male")}
+                        className={`px-3 py-1.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
+                          narratorVoice === "male" ? "bg-[#8B5CF6] text-white shadow-sm" : "text-zinc-500 hover:text-zinc-300"
+                        }`}
+                      >
+                        Male
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNarratorVoice("female")}
+                        className={`px-3 py-1.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
+                          narratorVoice === "female" ? "bg-[#8B5CF6] text-white shadow-sm" : "text-zinc-500 hover:text-zinc-300"
+                        }`}
+                      >
+                        Female
+                      </button>
+                    </div>
                   </div>
 
-                  {selectedStory.nlp_status === "processing" ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-center py-12 space-y-4">
-                      <Loader2 className="w-8 h-8 animate-spin text-[#7C5CFF]" />
-                      <div className="space-y-1">
-                        <p className="text-sm font-semibold text-zinc-200">Analyzing Story Content</p>
-                        <p className="text-xs text-zinc-500 max-w-[280px] mx-auto">
-                          Running NLP pipeline to extract characters, segments, and emotional tones...
-                        </p>
-                      </div>
-                    </div>
-                  ) : selectedStory.nlp_status === "completed" && selectedStory.annotated_content ? (
-                    <div className="flex-1 flex flex-col space-y-4 min-h-0">
-                      {/* Character Lists */}
-                      {selectedStory.annotated_content.characters && selectedStory.annotated_content.characters.length > 0 ? (
-                        <div className="space-y-1.5">
-                          <h5 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Detected Characters & Voices</h5>
-                          <div className="flex flex-wrap gap-1.5">
-                            {selectedStory.annotated_content.characters.map((char) => (
-                              <span key={char.name} className="px-2.5 py-1 bg-[#1A1A24] border border-[#1E1E2A] text-zinc-300 rounded-lg text-xs font-medium flex items-center space-x-1.5 hover:border-[#7C5CFF]/30 transition-colors">
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#7C5CFF]" />
-                                <span>{char.name}</span>
-                                <span className="text-[10px] text-zinc-500">({char.voice_profile})</span>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
+                </div>
+
+                {/* Narrative Viewer (Clean typography, generous padding) */}
+                <div className="bg-[#0A0E17] border border-white/5 rounded-2xl p-6 text-sm text-zinc-300 leading-relaxed max-h-[220px] overflow-y-auto custom-scrollbar select-text space-y-1">
+                  {selectedStory.annotated_content.segments.map((seg, idx) => {
+                    const isActive = idx === activeSegmentIndex;
+                    return (
+                      <span 
+                        key={idx} 
+                        id={`segment-${idx}`}
+                        onClick={() => handleSegmentClick(idx)}
+                        className={`inline transition-all duration-200 ${
+                          isActive 
+                            ? "text-[#8B5CF6] font-medium" 
+                            : "opacity-85 hover:opacity-100"
+                        } ${
+                          seg.type === "dialogue" ? "font-semibold" : ""
+                        } ${
+                          audioStatus === "completed" ? "cursor-pointer" : "cursor-help"
+                        }`}
+                        title={
+                          audioStatus === "completed" 
+                            ? `Click to seek here | ${seg.type} | ${seg.emotion}`
+                            : `${seg.type} | ${seg.emotion}`
+                        }
+                      >
+                        {seg.text}{" "}
+                      </span>
+                    );
+                  })}
+                </div>
+
+                {/* AUDIO CONTROLLER CONTAINER */}
+                <div className="border-t border-white/5 pt-6 space-y-4">
+                  
+                  {/* Action states for Audio */}
+                  {audioStatus === "none" && (
+                    <button
+                      onClick={() => handleGenerateAudio(selectedStory.id)}
+                      disabled={isGeneratingAudio}
+                      className="w-full bg-[#8B5CF6] hover:bg-[#7c4dff] active:scale-[0.99] text-white font-semibold py-3 px-6 rounded-2xl transition-all duration-200 shadow-lg shadow-[#8B5CF6]/15 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50 text-sm"
+                    >
+                      {isGeneratingAudio ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Generating Audio track...</span>
+                        </>
                       ) : (
-                        <div className="p-2.5 bg-[#1A1A24]/50 border border-[#1E1E2A] rounded-xl text-[11px] text-zinc-500">
-                          No characters detected in this story.
-                        </div>
+                        <>
+                          <Music className="w-4 h-4" />
+                          <span>Generate Audiobook Audio</span>
+                        </>
                       )}
+                    </button>
+                  )}
 
-                      {/* Annotated Content Blocks */}
-                      <div className="flex-1 overflow-y-auto max-h-[260px] text-sm text-zinc-300 leading-relaxed bg-[#0B0B0F] p-4 rounded-xl border border-[#1E1E2A] custom-scrollbar space-y-2 select-text">
-                        {selectedStory.annotated_content.segments.map((seg, idx) => (
-                          <span 
-                            key={idx} 
-                            className={`inline px-1 py-0.5 rounded transition-all duration-200 cursor-help ${
-                              seg.type === "dialogue" ? "font-semibold border-b border-dashed border-zinc-700" : ""
-                            }`}
-                            style={{ 
-                              backgroundColor: `${seg.color}15`, // 8% opacity
-                              borderLeft: `2.5px solid ${seg.color}`,
-                              paddingLeft: '6px'
-                            }}
-                            title={`${seg.type.toUpperCase()} | Emotion: ${seg.emotion}`}
-                          >
-                            {seg.text}{" "}
-                          </span>
-                        ))}
-                      </div>
-
-                      {/* Legend */}
-                      <div className="flex flex-wrap gap-x-3 gap-y-1.5 text-[10px] text-zinc-500 pt-2 border-t border-[#1E1E2A]/50">
-                        <span className="font-semibold uppercase tracking-wider text-zinc-600">Emotion Map:</span>
-                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#F5C518]" /> <span>Happy</span></span>
-                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#4A90D9]" /> <span>Sad</span></span>
-                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#E84040]" /> <span>Angry</span></span>
-                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#9B59B6]" /> <span>Suspenseful</span></span>
-                        <span className="flex items-center space-x-1"><span className="w-2 h-2 rounded-full bg-[#A0A0A0]" /> <span>Neutral</span></span>
-                      </div>
-
-                      {/* Audio Controller Section */}
-                      <div className="border-t border-[#1E1E2A]/50 pt-4 mt-2">
-                        {/* If no audio generated yet */}
-                        {audioStatus === "none" && (
-                          <button
-                            onClick={() => handleGenerateAudio(selectedStory.id)}
-                            disabled={isGeneratingAudio}
-                            className="w-full bg-gradient-to-r from-[#7C5CFF] via-[#8B5CF6] to-[#00D4FF] hover:opacity-95 active:scale-[0.99] text-white font-semibold py-2.5 px-4 rounded-xl transition-all duration-200 shadow-lg shadow-[#7C5CFF]/20 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
-                          >
-                            {isGeneratingAudio ? (
-                              <>
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                                <span>Starting Audio Pipeline...</span>
-                              </>
-                            ) : (
-                              <>
-                                <Music className="w-4 h-4" />
-                                <span>Generate Audiobook (Procedural Synthesizer)</span>
-                              </>
-                            )}
-                          </button>
-                        )}
-
-                        {/* If audio is generating (pending or processing) */}
-                        {(audioStatus === "pending" || audioStatus === "processing") && (
-                          <div className="bg-[#161622] border border-[#1E1E2A] rounded-xl p-4 flex flex-col space-y-3 relative overflow-hidden">
-                            {/* Glow bar effect */}
-                            <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-[#7C5CFF] to-[#00D4FF] animate-pulse" />
-                            
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center space-x-2">
-                                <Loader2 className="w-4 h-4 animate-spin text-[#7C5CFF]" />
-                                <span className="text-xs font-semibold text-zinc-200">
-                                  {audioStatus === "pending" ? "Queueing audio task..." : "Generating audio..."}
-                                </span>
-                              </div>
-                              <span className="text-[10px] text-zinc-500 font-mono">Status: {audioStatus}</span>
-                            </div>
-
-                            {/* Progress Shimmer Bar */}
-                            <div className="w-full h-1.5 bg-[#0B0B0F] rounded-full overflow-hidden relative">
-                              <div className="absolute top-0 bottom-0 left-0 w-1/2 bg-gradient-to-r from-[#7C5CFF] to-[#00D4FF] rounded-full animate-shimmer-progress" />
-                            </div>
-
-                            <p className="text-[11px] text-zinc-400 italic text-center">
-                              {dynamicStatusText}
-                            </p>
-                          </div>
-                        )}
-
-                        {/* If audio failed */}
-                        {audioStatus === "failed" && (
-                          <div className="bg-red-500/5 border border-red-500/10 rounded-xl p-4 flex flex-col space-y-3">
-                            <div className="flex items-center space-x-2 text-red-400">
-                              <AlertTriangle className="w-4 h-4 shrink-0" />
-                              <span className="text-xs font-semibold">Audio Generation Failed</span>
-                            </div>
-                            <p className="text-[11px] text-zinc-500">
-                              An error occurred during audio synthesis. Please verify your story text and try again.
-                            </p>
-                            <button
-                              onClick={() => handleGenerateAudio(selectedStory.id)}
-                              className="w-full bg-[#1A1A24] border border-[#1E1E2A] hover:border-red-500/30 text-zinc-300 font-semibold py-2 rounded-lg text-xs transition-colors flex items-center justify-center space-x-2 cursor-pointer"
-                            >
-                              <RotateCcw className="w-3.5 h-3.5" />
-                              <span>Retry Generation</span>
-                            </button>
-                          </div>
-                        )}
-
-                        {/* If audio is completed -> Show custom audio player */}
-                        {audioStatus === "completed" && audioUrl && (
-                          <div className="bg-[#161622] border border-[#1E1E2A] rounded-xl p-4 flex flex-col space-y-3">
-                            {/* Hidden HTML5 Audio Element */}
-                            <audio
-                              ref={audioRef}
-                              src={audioUrl.startsWith("http") ? audioUrl : `${API_BASE_URL}${audioUrl}`}
-                              onTimeUpdate={handleTimeUpdate}
-                              onDurationChange={handleDurationChange}
-                              onEnded={handleAudioEnded}
-                            />
-                            
-                            {/* Audio details */}
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center space-x-2 text-xs text-zinc-400">
-                                <Headphones className="w-3.5 h-3.5 text-[#00D4FF]" />
-                                <span className="font-semibold text-zinc-300">Generated Audiobook</span>
-                              </div>
-                              <div className="flex items-center space-x-2">
-                                {/* Download button */}
-                                <a
-                                  href={audioUrl.startsWith("http") ? audioUrl : `${API_BASE_URL}${audioUrl}`}
-                                  download={`storyvoice_${selectedStory.id}.wav`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="p-1.5 bg-[#1E1E2A] hover:bg-[#7C5CFF]/20 border border-[#2E2E3A] hover:border-[#7C5CFF]/40 rounded-lg text-zinc-400 hover:text-white transition-all duration-200 cursor-pointer"
-                                  title="Download Audio File"
-                                >
-                                  <Download className="w-3.5 h-3.5" />
-                                </a>
-                                {/* Re-generate button */}
-                                <button
-                                  onClick={() => handleGenerateAudio(selectedStory.id)}
-                                  className="p-1.5 bg-[#1E1E2A] hover:bg-[#7C5CFF]/20 border border-[#2E2E3A] hover:border-[#7C5CFF]/40 rounded-lg text-zinc-400 hover:text-white transition-all duration-200 cursor-pointer"
-                                  title="Regenerate Audio"
-                                >
-                                  <RotateCcw className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Progress bar / scrub bar */}
-                            <div className="flex items-center space-x-3">
-                              <span className="text-[10px] text-zinc-500 font-mono w-10 text-right">
-                                {formatTime(currentTime)}
-                              </span>
-                              <input
-                                type="range"
-                                min={0}
-                                max={duration || 100}
-                                value={currentTime}
-                                onChange={handleSeek}
-                                className="flex-1 h-1 bg-[#0B0B0F] rounded-lg appearance-none cursor-pointer accent-[#7C5CFF] hover:accent-[#00D4FF] focus:outline-none"
-                              />
-                              <span className="text-[10px] text-zinc-500 font-mono w-10">
-                                {formatTime(duration)}
-                              </span>
-                            </div>
-
-                            {/* Player Controls */}
-                            <div className="flex items-center justify-between pt-1">
-                              {/* Playback speed */}
-                              <button
-                                onClick={cyclePlaybackRate}
-                                className="text-[10px] font-semibold font-mono text-zinc-400 bg-[#1A1A24] border border-[#2E2E3A] px-2 py-1 rounded hover:text-white transition-colors cursor-pointer"
-                              >
-                                {playbackRate}x
-                              </button>
-
-                              {/* Play / Pause */}
-                              <button
-                                onClick={togglePlayPause}
-                                className="w-10 h-10 rounded-full bg-gradient-to-tr from-[#7C5CFF] to-[#00D4FF] hover:scale-105 active:scale-95 text-white flex items-center justify-center shadow-md shadow-[#7C5CFF]/20 transition-all duration-200 cursor-pointer"
-                              >
-                                {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white translate-x-[1px]" />}
-                              </button>
-
-                              {/* Volume Controls */}
-                              <div className="flex items-center space-x-1.5">
-                                <button
-                                  onClick={toggleMute}
-                                  className="text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
-                                >
-                                  {isMuted || volume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                                </button>
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={1}
-                                  step={0.05}
-                                  value={isMuted ? 0 : volume}
-                                  onChange={handleVolumeChange}
-                                  className="w-16 h-1 bg-[#0B0B0F] rounded-lg appearance-none cursor-pointer accent-[#00D4FF]"
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex-1 flex flex-col space-y-4">
-                      <div className="flex-1 overflow-y-auto max-h-[300px] text-sm text-zinc-400 leading-relaxed bg-[#0B0B0F] p-4 rounded-xl border border-[#1E1E2A] custom-scrollbar whitespace-pre-wrap select-text">
-                        {selectedStory.content}
-                      </div>
+                  {(audioStatus === "pending" || audioStatus === "processing") && (
+                    <div className="bg-[#0A0E17]/40 border border-white/5 rounded-2xl p-5 flex flex-col space-y-3 relative overflow-hidden">
+                      <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#8B5CF6] animate-pulse" />
                       
-                      <div className="pt-2">
-                        <button 
-                          onClick={() => handleAnalyzeStory(selectedStory.id)}
-                          disabled={isAnalyzing}
-                          className="w-full bg-gradient-to-r from-[#7C5CFF] to-[#A78BFA] hover:from-[#6b4ae6] hover:to-[#9675e8] active:scale-[0.98] text-white font-semibold py-3 rounded-xl transition-all duration-200 shadow-lg shadow-[#7C5CFF]/20 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
-                        >
-                          {isAnalyzing ? (
-                            <>
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              <span>Requesting analysis...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Sparkles className="w-4 h-4" />
-                              <span>Process NLP Pipeline (Phase 4)</span>
-                            </>
-                          )}
-                        </button>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-2">
+                          <Loader2 className="w-4 h-4 animate-spin text-[#8B5CF6]" />
+                          <span className="text-xs font-semibold text-zinc-300">
+                            {audioStatus === "pending" ? "Queueing audio pipeline..." : "Synthesizing dialogue voices..."}
+                          </span>
+                        </div>
+                        <span className="text-[9px] text-zinc-500 font-mono uppercase tracking-wider">Loading</span>
                       </div>
+
+                      <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden relative">
+                        <div className="absolute top-0 bottom-0 left-0 w-1/3 bg-[#8B5CF6] rounded-full animate-shimmer-progress" />
+                      </div>
+
+                      <p className="text-[10px] text-zinc-400 italic text-center">
+                        {dynamicStatusText}
+                      </p>
                     </div>
                   )}
+
+                  {audioStatus === "failed" && (
+                    <div className="bg-red-500/5 border border-red-500/10 rounded-2xl p-5 flex flex-col space-y-3">
+                      <div className="flex items-center space-x-2 text-red-400">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span className="text-xs font-semibold">Audio generation failed</span>
+                      </div>
+                      <p className="text-[11px] text-zinc-500">
+                        An error occurred while synthesizing the dialogue voices. Please verify text formatting and retry.
+                      </p>
+                      <button
+                        onClick={() => handleGenerateAudio(selectedStory.id)}
+                        className="w-full bg-[#111827] border border-white/5 hover:border-red-500/30 text-zinc-300 font-semibold py-2.5 rounded-xl text-xs transition-colors flex items-center justify-center space-x-2 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Retry Generation</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* PREMIUM PODCAST AUDIO PLAYER */}
+                  {audioStatus === "completed" && audioUrl && (
+                    <div className="bg-[#0A0E17]/60 border border-white/5 rounded-2xl p-6 flex flex-col items-center space-y-6 shadow-inner">
+                      
+                      {/* Hidden HTML5 Audio Element */}
+                      <audio
+                        ref={audioRef}
+                        src={audioUrl.startsWith("http") ? audioUrl : `${API_BASE_URL}${audioUrl}`}
+                        onTimeUpdate={handleTimeUpdate}
+                        onDurationChange={handleDurationChange}
+                        onEnded={handleAudioEnded}
+                      />
+                      
+                      {/* Simple Dynamic Waveform Visualizer */}
+                      <div className="flex items-end justify-center space-x-1 h-12 w-full max-w-xs px-2">
+                        {Array.from({ length: 32 }).map((_, i) => {
+                          const mid = 16;
+                          const dist = Math.abs(i - mid);
+                          const baseHeight = Math.max(10, 85 - dist * 4.5);
+                          return (
+                            <div
+                              key={i}
+                              className={`w-[2.5px] bg-[#8B5CF6] rounded-full transition-all duration-300`}
+                              style={{
+                                height: isPlaying ? '100%' : `${baseHeight}%`,
+                                maxHeight: `${baseHeight}%`,
+                                opacity: isPlaying ? 0.95 : 0.25,
+                                animationName: isPlaying ? 'wave-bounce' : 'none',
+                                animationDuration: '1.1s',
+                                animationTimingFunction: 'ease-in-out',
+                                animationIterationCount: 'infinite',
+                                animationDelay: `${(i % 8) * 0.12}s`,
+                                transformOrigin: 'bottom'
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {/* Scrubber / Progress timeline */}
+                      <div className="w-full flex items-center space-x-3">
+                        <span className="text-[10px] text-zinc-500 font-mono w-10 text-right">
+                          {formatTime(currentTime)}
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={duration || 100}
+                          value={currentTime}
+                          onChange={handleSeek}
+                          className="flex-1 h-1 bg-white/5 rounded-lg appearance-none cursor-pointer accent-[#8B5CF6] hover:accent-[#a78bfa] focus:outline-none"
+                        />
+                        <span className="text-[10px] text-zinc-500 font-mono w-10">
+                          {formatTime(duration)}
+                        </span>
+                      </div>
+
+                      {/* Controls Row */}
+                      <div className="w-full flex items-center justify-between">
+                        
+                        {/* Speed controller */}
+                        <button
+                          onClick={cyclePlaybackRate}
+                          className="text-[10px] font-bold font-mono text-zinc-400 bg-[#111827] border border-white/5 px-2.5 py-1.5 rounded-lg hover:text-white transition-colors cursor-pointer"
+                        >
+                          {playbackRate}x
+                        </button>
+
+                        {/* Large pulsing Play / Pause button */}
+                        <div className="relative">
+                          <button
+                            onClick={togglePlayPause}
+                            className={`w-14 h-14 rounded-full bg-[#8B5CF6] text-white flex items-center justify-center shadow-lg transition-all duration-300 cursor-pointer hover:scale-105 active:scale-95 ${
+                              isPlaying ? 'animate-custom-pulse shadow-[#8B5CF6]/30' : ''
+                            }`}
+                          >
+                            {isPlaying ? (
+                              <Pause className="w-5 h-5 fill-white" />
+                            ) : (
+                              <Play className="w-5 h-5 fill-white translate-x-[1.5px]" />
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Mute and volume */}
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={toggleMute}
+                            className="text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
+                          >
+                            {isMuted || volume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                          </button>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={isMuted ? 0 : volume}
+                            onChange={handleVolumeChange}
+                            className="w-12 h-1 bg-white/5 rounded-lg appearance-none cursor-pointer accent-[#8B5CF6]"
+                          />
+                        </div>
+
+                      </div>
+
+                      {/* Download and regenerate actions */}
+                      <div className="w-full border-t border-white/5 pt-4 flex justify-end items-center space-x-2">
+                        <button
+                          onClick={() => handleGenerateAudio(selectedStory.id)}
+                          className="px-3 py-1.5 bg-[#111827] hover:bg-[#111827]/80 border border-white/5 hover:border-[#8B5CF6]/20 rounded-xl text-[10px] font-bold text-zinc-400 hover:text-zinc-200 transition-all cursor-pointer flex items-center space-x-1.5"
+                          title="Regenerate audiobook track"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Regenerate</span>
+                        </button>
+                        <a
+                          href={audioUrl.startsWith("http") ? audioUrl : `${API_BASE_URL}${audioUrl}`}
+                          download={`storyvoice_${selectedStory.id}.wav`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-3 py-1.5 bg-[#8B5CF6]/10 hover:bg-[#8B5CF6]/20 border border-[#8B5CF6]/25 rounded-xl text-[10px] font-bold text-[#A78BFA] hover:text-[#C084FC] transition-all cursor-pointer flex items-center space-x-1.5"
+                          title="Download final audio file"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>Download WAV</span>
+                        </a>
+                      </div>
+
+                    </div>
+                  )}
+
                 </div>
-              ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-center text-zinc-500 py-16">
-                  <FileText className="w-10 h-10 mb-2 text-zinc-600 opacity-60 animate-pulse" />
-                  <p className="text-sm font-medium">Select a story to preview</p>
+              </div>
+            ) : (
+              /* If story created but NLP not run yet */
+              <div className="space-y-4">
+                <div className="bg-[#0A0E17] border border-white/5 rounded-2xl p-6 text-sm text-zinc-400 leading-relaxed max-h-[220px] overflow-y-auto custom-scrollbar select-text whitespace-pre-wrap">
+                  {selectedStory.content}
                 </div>
-              )}
-            </div>
+                
+                <button 
+                  onClick={() => handleAnalyzeStory(selectedStory.id)}
+                  disabled={isAnalyzing}
+                  className="w-full bg-[#8B5CF6] hover:bg-[#7c4dff] active:scale-[0.98] text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-[#8B5CF6]/15 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer text-sm"
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Running NLP Engine...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      <span>Process Narrative Pipeline</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
-        </section>
+        )}
 
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-[#1E1E2A] py-6 px-6 bg-[#0B0B0F] mt-auto">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between text-xs text-zinc-600">
-          <p>© {new Date().getFullYear()} StoryVoice AI. All rights reserved.</p>
-          <div className="flex space-x-4 mt-2 sm:mt-0">
+      <footer className="border-t border-white/5 py-8 px-4 sm:px-6 bg-[#0A0E17]/60 mt-auto z-10">
+        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-between text-[11px] text-zinc-600 gap-2">
+          <p>© {new Date().getFullYear()} StoryVoice AI. Zero data persisted locally.</p>
+          <div className="flex space-x-4">
             <span>Powered by Next.js & FastAPI</span>
             <span>•</span>
-            <span>Premium UI Design</span>
+            <span>Premium Calm UI</span>
           </div>
         </div>
       </footer>
 
-      {/* Styled custom scrollbar */}
+      {/* Styled custom scrollbar & animations */}
       <style jsx global>{`
         .custom-scrollbar::-webkit-scrollbar {
-          width: 5px;
-          height: 5px;
+          width: 4px;
+          height: 4px;
         }
         .custom-scrollbar::-webkit-scrollbar-track {
-          background: #0B0B0F;
+          background: transparent;
         }
         .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #1E1E2A;
+          background: rgba(255, 255, 255, 0.08);
           border-radius: 99px;
         }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #7C5CFF/30;
+          background: rgba(139, 92, 246, 0.25);
         }
         @keyframes shimmer-progress {
           0% { transform: translateX(-100%); }

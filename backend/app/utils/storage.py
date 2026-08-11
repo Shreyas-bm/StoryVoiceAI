@@ -42,13 +42,13 @@ if not use_local_storage:
 else:
     print("MinIO port is closed. Using local storage fallback.")
 
+IN_MEMORY_STORAGE = {}
 BUCKET_NAME = "storyvoice-audio"
 LOCAL_STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "storage")
 
 def ensure_bucket_exists():
     global use_local_storage
     if use_local_storage:
-        os.makedirs(LOCAL_STORAGE_DIR, exist_ok=True)
         return
     try:
         found = minio_client.bucket_exists(BUCKET_NAME)
@@ -57,14 +57,15 @@ def ensure_bucket_exists():
     except Exception as e:
         print(f"MinIO bucket check failed: {e}. Switching to local storage.")
         use_local_storage = True
-        os.makedirs(LOCAL_STORAGE_DIR, exist_ok=True)
 
 def upload_file(file_path: str, object_name: str):
     ensure_bucket_exists()
     if use_local_storage:
-        dest_path = os.path.join(LOCAL_STORAGE_DIR, object_name)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        shutil.copy2(file_path, dest_path)
+        try:
+            with open(file_path, "rb") as f:
+                IN_MEMORY_STORAGE[object_name] = f.read()
+        except Exception as e:
+            print(f"Failed to read file for in-memory upload: {e}")
         return f"/static/{object_name}"
     
     try:
@@ -73,9 +74,12 @@ def upload_file(file_path: str, object_name: str):
         return f"{proto}://{MINIO_ENDPOINT}/{BUCKET_NAME}/{object_name}"
     except Exception as e:
         print(f"MinIO upload failed: {e}. Falling back to local storage.")
-        dest_path = os.path.join(LOCAL_STORAGE_DIR, object_name)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        shutil.copy2(file_path, dest_path)
+        try:
+            with open(file_path, "rb") as f:
+                IN_MEMORY_STORAGE[object_name] = f.read()
+        except Exception as err:
+            print(f"Failed to read file for in-memory fallback upload: {err}")
         return f"/static/{object_name}"
+
 
 
