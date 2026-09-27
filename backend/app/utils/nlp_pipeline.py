@@ -10,6 +10,8 @@ This implementation is 100% offline, zero-dependency, extremely lightweight, and
 """
 
 import re
+import itertools
+import collections
 import logging
 from typing import List, Dict, Any
 
@@ -27,6 +29,20 @@ EMOTION_COLOR_MAP = {
     "neutral": "#A0A0A0",
 }
 
+QUOTE_TRANSLATION = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"'
+})
+
+NON_PRINTABLE_PATTERN = re.compile(r"[^\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]")
+CONSECUTIVE_NEWLINES_PATTERN = re.compile(r"\n{3,}")
+SENTENCE_DELIMITERS_PATTERN = re.compile(r'[.!?\n]+')
+WORD_PATTERN = re.compile(r'\b[a-z]+\b')
+ALPHA_WORD_PATTERN = re.compile(r'\b[A-Za-z]+\b')
+ALL_CAPS_PATTERN = re.compile(r'\b[A-Z]{2,}\b')
+
 # ---------------------------------------------------------------------------
 # 4.2 — Text Preprocessing
 # ---------------------------------------------------------------------------
@@ -38,16 +54,9 @@ def preprocess_text(text: str) -> str:
     - Normalise curly/smart quotes to straight quotes
     - Strip leading/trailing whitespace
     """
-    # Normalise smart / curly quotes to standard ASCII quotes
-    text = text.replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-
-    # Remove non-printable characters (keep newlines and tabs)
-    text = re.sub(r"[^\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]", "", text)
-
-    # Collapse 3+ consecutive blank lines to a double newline
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
+    text = text.translate(QUOTE_TRANSLATION)
+    text = NON_PRINTABLE_PATTERN.sub("", text)
+    text = CONSECUTIVE_NEWLINES_PATTERN.sub("\n\n", text)
     return text.strip()
 
 
@@ -104,7 +113,7 @@ EMOTION_LEXICONS = {
         "smile", "smiled", "smiling", "cheerful", "cheerfully", "delight", "delighted", "delightful", "glad", "gladly", 
         "grin", "grinned", "grinning", "excited", "exciting", "excitement", "celebrate", "celebrating", "celebrated", 
         "celebration", "merry", "mirth", "glee", "gleeful", "thrill", "thrilled", "thrilling", "pleased", "pleasant", 
-        "pleasantly", "warm", "warmly", "friendly", "chuckle", "chuckled", "giggle", "giggled", "giggle", "beam", 
+        "pleasantly", "warm", "warmly", "friendly", "chuckle", "chuckled", "giggle", "giggled", "beam", 
         "beamed", "beaming", "joke", "joked", "joking"
     ],
     "sad": [
@@ -138,8 +147,11 @@ EMOTION_LEXICONS = {
     ]
 }
 
-NEGATIONS = {"not", "no", "never", "without", "barely", "hardly", "none", "neither", "cant", "cannot", "wasnt", "didnt"}
-INTENSIFIERS = {"very", "so", "extremely", "incredibly", "really", "highly", "deeply", "absolutely", "much", "too"}
+# Pre-indexed keyword to emotion map for fast O(1) lookup
+KEYWORD_TO_EMOTION = {word: emo for emo, words in EMOTION_LEXICONS.items() for word in words}
+
+NEGATIONS = frozenset({"not", "no", "never", "without", "barely", "hardly", "none", "neither", "cant", "cannot", "wasnt", "didnt"})
+INTENSIFIERS = frozenset({"very", "so", "extremely", "incredibly", "really", "highly", "deeply", "absolutely", "much", "too"})
 
 
 def detect_emotion(text: str) -> str:
@@ -150,49 +162,29 @@ def detect_emotion(text: str) -> str:
     if not text.strip():
         return "neutral"
 
-    text_lower = text.lower()
-    
-    # Extract words
-    words = re.findall(r'\b[a-z]+\b', text_lower)
+    words = WORD_PATTERN.findall(text.lower())
     if not words:
         return "neutral"
 
-    scores = {emotion: 0.0 for emotion in EMOTION_LEXICONS}
+    scores = dict.fromkeys(EMOTION_LEXICONS, 0.0)
 
     # Evaluate each word
     for i, word in enumerate(words):
-        word_emotion = None
-        for emotion, keywords in EMOTION_LEXICONS.items():
-            if word in keywords:
-                word_emotion = emotion
-                break
-        
+        word_emotion = KEYWORD_TO_EMOTION.get(word)
         if word_emotion:
             # Check for negation words in the window preceding the keyword
-            negated = False
-            start_idx = max(0, i - 3)
-            for j in range(start_idx, i):
-                if words[j] in NEGATIONS:
-                    negated = True
-                    break
+            negated = any(words[j] in NEGATIONS for j in range(max(0, i - 3), i))
             
             # Check for intensifiers preceding the keyword
-            multiplier = 1.0
-            if i > 0 and words[i-1] in INTENSIFIERS:
-                multiplier = 2.0
+            multiplier = 2.0 if (i > 0 and words[i - 1] in INTENSIFIERS) else 1.0
             
             if negated:
-                # If happy is negated, it counts towards sad
                 if word_emotion == "happy":
                     scores["sad"] += 1.0 * multiplier
-                else:
-                    # just ignore or reduce other negated emotions
-                    pass
             else:
                 scores[word_emotion] += 1.0 * multiplier
 
     # Punctuation and style analysis
-    # Exclamation marks: increase happy/angry scores
     exclamation_count = text.count("!")
     if exclamation_count > 0:
         if scores["angry"] > scores["happy"]:
@@ -203,37 +195,69 @@ def detect_emotion(text: str) -> str:
             scores["happy"] += 0.5 * exclamation_count
             scores["angry"] += 0.5 * exclamation_count
 
-    # Ellipsis or dashes: increase suspenseful score
     ellipsis_count = text.count("...") + text.count("—") + text.count("--")
     if ellipsis_count > 0:
         scores["suspenseful"] += 1.0 * ellipsis_count
 
-    # All-caps words (ignoring single letter 'I' or very short words)
-    all_caps_words = [w for w in re.findall(r'\b[A-Z]{2,}\b', text) if w != "OK"]
+    all_caps_words = [w for w in ALL_CAPS_PATTERN.findall(text) if w != "OK"]
     if all_caps_words:
-        if scores["angry"] >= scores["happy"]:
-            scores["angry"] += 1.0 * len(all_caps_words)
-        else:
-            scores["happy"] += 1.0 * len(all_caps_words)
+        target_emo = "angry" if scores["angry"] >= scores["happy"] else "happy"
+        scores[target_emo] += 1.0 * len(all_caps_words)
 
     # Determine highest scoring emotion
-    best_emotion = "neutral"
-    highest_score = 0.0
-    for emotion, score in scores.items():
-        if score > highest_score:
-            highest_score = score
-            best_emotion = emotion
-
-    # Require a minimum score threshold to avoid false positives on short texts
-    if highest_score < 0.2:
-        return "neutral"
-
-    return best_emotion
+    best_emotion, highest_score = max(scores.items(), key=lambda item: item[1])
+    return best_emotion if highest_score >= 0.2 else "neutral"
 
 
 # ---------------------------------------------------------------------------
 # 4.5 — Named Entity Recognition (characters from scratch)
 # ---------------------------------------------------------------------------
+STOPWORDS = frozenset({
+    "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", 
+    "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", 
+    "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves", 
+    "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", 
+    "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", 
+    "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", 
+    "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", 
+    "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", 
+    "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", 
+    "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", 
+    "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", 
+    "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august", "september",
+    "october", "november", "december", "london", "paris", "new", "york", "mr", "mrs", "ms",
+    "dr", "professor", "sir", "lady", "uncle", "aunt", "yes", "no", "hello", "hi", "oh",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "first", "second", "third", "morning", "night", "day", "evening", "afternoon",
+    "wood", "forest", "room", "house", "town", "city", "street", "road", "mountain",
+    "river", "lake", "ocean", "sea", "sky", "sun", "moon", "star", "wind", "rain",
+    "shadows", "shadow", "stone", "floor", "storm", "world", "god", "heaven", "hell",
+    "father", "mother", "brother", "sister", "son", "daughter", "friend", "man", "woman",
+    "boy", "girl", "baby", "child", "children", "people", "someone", "anyone", "everyone",
+    "nothing", "something", "anything", "everything", "way", "time", "year", "years"
+})
+
+TITLE_PREFIXES = frozenset({"mr", "mrs", "ms", "dr", "professor", "sir", "lady", "uncle", "aunt"})
+
+ATTRIBUTION_VERBS = frozenset({
+    "said", "whispered", "replied", "asked", "shouted", "yelled", "cried", "muttered", 
+    "thought", "called", "exclaimed", "sighed", "gasped", "groaned", "laughed", "smiled", 
+    "grumbled", "snapped", "whimpered", "stammered", "stutters", "stuttered", "added", 
+    "continued", "began", "murmured", "screamed", "warned", "demanded", "snorted", 
+    "hissed", "growled", "roared", "wept", "sobbed", "chuckle", "chuckled"
+})
+
+CHARACTER_VOICE_PROFILES = [
+    "character_deep",
+    "character_light",
+    "character_gruff",
+    "character_soft",
+    "character_energetic",
+]
+
+
 def extract_characters(text: str) -> List[Dict[str, Any]]:
     """
     Extract character names from the story text using a rules-based NLP algorithm from scratch.
@@ -243,125 +267,63 @@ def extract_characters(text: str) -> List[Dict[str, Any]]:
     if not text.strip():
         return []
 
-    # Compile list of common English words / stopwords / non-character capitalized words to exclude
-    stopwords = {
-        "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", 
-        "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", 
-        "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves", 
-        "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", 
-        "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", 
-        "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", 
-        "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", 
-        "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", 
-        "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", 
-        "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", 
-        "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", 
-        "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now",
-        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-        "january", "february", "march", "april", "may", "june", "july", "august", "september",
-        "october", "november", "december", "london", "paris", "new", "york", "mr", "mrs", "ms",
-        "dr", "professor", "sir", "lady", "uncle", "aunt", "yes", "no", "hello", "hi", "oh",
-        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "first", "second", "third", "morning", "night", "day", "evening", "afternoon",
-        "wood", "forest", "room", "house", "town", "city", "street", "road", "mountain",
-        "river", "lake", "ocean", "sea", "sky", "sun", "moon", "star", "wind", "rain",
-        "shadows", "shadow", "stone", "floor", "storm", "world", "god", "heaven", "hell",
-        "father", "mother", "brother", "sister", "son", "daughter", "friend", "man", "woman",
-        "boy", "girl", "baby", "child", "children", "people", "someone", "anyone", "everyone",
-        "nothing", "something", "anything", "everything", "way", "time", "year", "years"
-    }
-
-    # Dialogue attribution verbs
-    attribution_verbs = {
-        "said", "whispered", "replied", "asked", "shouted", "yelled", "cried", "muttered", 
-        "thought", "called", "exclaimed", "sighed", "gasped", "groaned", "laughed", "smiled", 
-        "grumbled", "snapped", "whimpered", "stammered", "stutters", "stuttered", "added", 
-        "continued", "began", "murmured", "screamed", "warned", "demanded", "snorted", 
-        "hissed", "growled", "roared", "wept", "sobbed", "chuckle", "chuckled"
-    }
-
-    # Split text into sentences using simple punctuation splitting
-    sentence_delimiters = re.compile(r'[.!?\n]+')
-    sentences = sentence_delimiters.split(text)
-
-    candidate_scores = {}
+    candidate_scores = collections.defaultdict(float)
+    sentences = [s.strip() for s in SENTENCE_DELIMITERS_PATTERN.split(text) if s.strip()]
 
     for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        
-        # Find words and check capitalization
-        words = re.findall(r'\b[A-Za-z]+\b', sentence)
+        words = ALPHA_WORD_PATTERN.findall(sentence)
         if not words:
             continue
             
+        sentence_lower = sentence.lower()
         for i, word in enumerate(words):
-            # Check if capitalized and not a stopword (case-insensitive check)
-            if word[0].isupper() and word.lower() not in stopwords:
+            if word[0].isupper() and word.lower() not in STOPWORDS:
                 # Is it part of a compound name? (e.g. John Smith)
-                name = word
+                name_tokens = [word]
                 j = i + 1
-                while j < len(words) and words[j][0].isupper() and words[j].lower() not in stopwords:
-                    name += " " + words[j]
+                while j < len(words) and words[j][0].isupper() and words[j].lower() not in STOPWORDS:
+                    name_tokens.append(words[j])
                     j += 1
                 
+                name = " ".join(name_tokens)
                 score = 1.0
                 
-                # Check if it is near an attribution verb in the sentence
-                sentence_lower = sentence.lower()
-                for verb in attribution_verbs:
-                    # Look for "[Name] said" or "said [Name]"
-                    if re.search(r'\b' + re.escape(name.lower()) + r'\s+(?:\w+\s+){0,2}' + re.escape(verb) + r'\b', sentence_lower) or \
-                       re.search(r'\b' + re.escape(verb) + r'\s+(?:\w+\s+){0,2}' + re.escape(name.lower()) + r'\b', sentence_lower):
+                # Check if near an attribution verb
+                for verb in ATTRIBUTION_VERBS:
+                    pattern_after = rf'\b{re.escape(name.lower())}\s+(?:\w+\s+){{0,2}}{re.escape(verb)}\b'
+                    pattern_before = rf'\b{re.escape(verb)}\s+(?:\w+\s+){{0,2}}{re.escape(name.lower())}\b'
+                    if re.search(pattern_after, sentence_lower) or re.search(pattern_before, sentence_lower):
                         score += 15.0
                 
                 # Check if preceded by a title prefix
-                if i > 0 and words[i-1].lower() in {"mr", "mrs", "ms", "dr", "professor", "sir", "lady", "uncle", "aunt"}:
+                if i > 0 and words[i - 1].lower() in TITLE_PREFIXES:
                     score += 10.0
                     
-                # If it's the very first word in the sentence, give it lower confidence unless boosted
+                # Lower confidence for initial words without boost
                 if i == 0 and score == 1.0:
                     score = 0.2
                     
-                candidate_scores[name] = candidate_scores.get(name, 0.0) + score
+                candidate_scores[name] += score
 
-    # Filter out candidates with low score or very short names
-    filtered_candidates = {}
-    for name, score in candidate_scores.items():
-        name_clean = name.strip()
-        if len(name_clean) < 2:
-            continue
-        # If the name is composed of words that are all stopwords, skip
-        words_in_name = name_clean.split()
-        if all(w.lower() in stopwords for w in words_in_name):
-            continue
-            
-        # Require a minimum score threshold
-        if score >= 1.0:
-            filtered_candidates[name_clean] = score
+    # Filter out candidates with low score or composed solely of stopwords
+    filtered_candidates = {
+        name.strip(): score
+        for name, score in candidate_scores.items()
+        if len(name.strip()) >= 2
+        and score >= 1.0
+        and not all(w.lower() in STOPWORDS for w in name.strip().split())
+    }
 
-    # Sort candidates by score descending
-    sorted_candidates = sorted(filtered_candidates.items(), key=lambda x: x[1], reverse=True)
+    sorted_candidates = sorted(filtered_candidates.items(), key=lambda item: item[1], reverse=True)[:6]
     
-    # Map to voice profiles
-    voice_profiles = [
-        "character_deep",
-        "character_light",
-        "character_gruff",
-        "character_soft",
-        "character_energetic",
-    ]
-    
-    characters = []
-    for idx, (name, score) in enumerate(sorted_candidates[:6]): # Limit to top 6 characters
-        characters.append({
+    return [
+        {
             "name": name,
             "mentions": int(score),
-            "voice_profile": voice_profiles[idx % len(voice_profiles)]
-        })
-        
-    return characters
+            "voice_profile": profile,
+        }
+        for (name, score), profile in zip(sorted_candidates, itertools.cycle(CHARACTER_VOICE_PROFILES))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -384,16 +346,17 @@ def run_nlp_pipeline(raw_text: str) -> Dict[str, Any]:
     segments = segment_text(clean_text)
 
     # Step 3: Detect emotion per segment
-    emotion_summary: Dict[str, int] = {e: 0 for e in EMOTION_LABELS}
-    enriched_segments = []
-    for seg in segments:
-        emotion = detect_emotion(seg["text"])
-        emotion_summary[emotion] = emotion_summary.get(emotion, 0) + 1
-        enriched_segments.append({
+    enriched_segments = [
+        {
             **seg,
-            "emotion": emotion,
-            "color": EMOTION_COLOR_MAP.get(emotion, "#A0A0A0"),
-        })
+            "emotion": (emo := detect_emotion(seg["text"])),
+            "color": EMOTION_COLOR_MAP.get(emo, "#A0A0A0"),
+        }
+        for seg in segments
+    ]
+
+    emotion_counts = collections.Counter(seg["emotion"] for seg in enriched_segments)
+    emotion_summary = {e: emotion_counts.get(e, 0) for e in EMOTION_LABELS}
 
     # Step 4: Extract characters from the full clean text
     characters = extract_characters(clean_text)
@@ -404,3 +367,4 @@ def run_nlp_pipeline(raw_text: str) -> Dict[str, Any]:
         "characters": characters,
         "emotion_summary": emotion_summary,
     }
+

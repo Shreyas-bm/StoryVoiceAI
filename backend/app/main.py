@@ -1,13 +1,15 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
-import os
+from pathlib import Path
 import logging
+from typing import Optional
+
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Response
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 
 from .database import engine, Base, get_db
 from . import models
 from .utils.parser import parse_document
+from .utils.storage import IN_MEMORY_STORAGE
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +27,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files directly from in-memory storage to avoid persisting files to disk
-from fastapi import Response
-from .utils.storage import IN_MEMORY_STORAGE
-
 @app.get("/static/{file_path:path}")
 def serve_static_in_memory(file_path: str):
     key = file_path.replace("\\", "/")
@@ -37,7 +35,6 @@ def serve_static_in_memory(file_path: str):
     raise HTTPException(status_code=404, detail="File not found in memory")
 
 
-# Helper function to get or create a default user for local testing
 def get_default_user_id(db: Session) -> int:
     default_user = db.query(models.User).filter_by(email="guest@storyvoice.ai").first()
     if not default_user:
@@ -59,8 +56,7 @@ def read_root():
 
 @app.get("/api/stories")
 def list_stories(db: Session = Depends(get_db)):
-    stories = db.query(models.Story).order_by(models.Story.created_at.desc()).all()
-    return stories
+    return db.query(models.Story).order_by(models.Story.created_at.desc()).all()
 
 
 @app.get("/api/stories/{story_id}")
@@ -95,18 +91,19 @@ def create_story(
 async def upload_story_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    title: str = Form(None),
+    title: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
     file_bytes = await file.read()
-    if len(file_bytes) == 0:
+    if not file_bytes:
         raise HTTPException(status_code=400, detail="File is empty")
 
+    filename = file.filename or "uploaded_story.txt"
     if not title or not title.strip():
-        title = os.path.splitext(file.filename)[0].replace("_", " ").replace("-", " ").title()
+        title = Path(filename).stem.replace("_", " ").replace("-", " ").title()
 
     try:
-        content = parse_document(file_bytes, file.filename)
+        content = parse_document(file_bytes, filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -154,8 +151,6 @@ def _run_and_save_pipeline(story_id: int):
 
     except Exception as exc:
         print(f"[BG TASK] Exception in pipeline for story_id={story_id}: {exc}")
-        import traceback
-        traceback.print_exc()
         logger.error("NLP pipeline failed for story_id=%s: %s", story_id, exc)
         try:
             story = db.query(models.Story).filter(models.Story.id == story_id).first()
@@ -175,12 +170,9 @@ def analyze_story(
     db: Session = Depends(get_db),
 ):
     """
-    Task 4.6 — Trigger NLP analysis for a given story.
+    Trigger NLP analysis for a given story.
     Runs the full pipeline (preprocess -> segment -> emotion -> NER) and
     saves the result to `story.annotated_content`.
-
-    Returns immediately with `nlp_status = processing` and runs the
-    heavy work in a FastAPI BackgroundTask so the API stays responsive.
     """
     story = db.query(models.Story).filter(models.Story.id == story_id).first()
     if not story:
@@ -189,7 +181,6 @@ def analyze_story(
     if not story.content or not story.content.strip():
         raise HTTPException(status_code=400, detail="Story has no content to analyze")
 
-    # Update status immediately so the client can poll
     story.nlp_status = "processing"
     db.commit()
 
@@ -206,7 +197,6 @@ def analyze_story(
 def get_story_analysis(story_id: int, db: Session = Depends(get_db)):
     """
     Return the NLP analysis result for a story.
-    Includes segments with emotion labels, character list, and emotion summary.
     """
     story = db.query(models.Story).filter(models.Story.id == story_id).first()
     if not story:
@@ -231,7 +221,7 @@ def trigger_audio_generation(
     db: Session = Depends(get_db)
 ):
     """
-    Task 5.6 & Celery Trigger — Trigger procedural audio generation for a story.
+    Trigger procedural audio generation for a story.
     Creates a new Job in the database and queues the Celery task.
     """
     if narrator_voice not in ("male", "female"):
@@ -247,22 +237,19 @@ def trigger_audio_generation(
             detail="Story has not been analyzed yet. Run POST /api/stories/{story_id}/analyze first."
         )
         
-    # Queue new audio generation job
     from .celery_app import generate_audio_task
     
-    # Create the job
     job = models.Job(story_id=story_id, status=models.JobStatus.PENDING)
     db.add(job)
     db.commit()
     db.refresh(job)
     
-    # Trigger Celery task asynchronously
     generate_audio_task.delay(job.id, narrator_voice=narrator_voice)
     
     return {
         "job_id": job.id,
         "story_id": story_id,
-        "status": job.status.value,
+        "status": getattr(job.status, "value", job.status),
         "message": "Audio generation started. Poll GET /api/stories/{story_id}/audio-status for results."
     }
 
@@ -276,7 +263,6 @@ def get_latest_audio_status(story_id: int, db: Session = Depends(get_db)):
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
         
-    # Find latest job
     latest_job = db.query(models.Job).filter(models.Job.story_id == story_id).order_by(models.Job.created_at.desc()).first()
     if not latest_job:
         return {
@@ -288,7 +274,7 @@ def get_latest_audio_status(story_id: int, db: Session = Depends(get_db)):
     return {
         "job_id": latest_job.id,
         "story_id": story_id,
-        "status": latest_job.status.value,
+        "status": getattr(latest_job.status, "value", latest_job.status),
         "audio_url": latest_job.audio_url,
         "created_at": latest_job.created_at,
         "updated_at": latest_job.updated_at
@@ -307,8 +293,9 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
     return {
         "job_id": job.id,
         "story_id": job.story_id,
-        "status": job.status.value,
+        "status": getattr(job.status, "value", job.status),
         "audio_url": job.audio_url,
         "created_at": job.created_at,
         "updated_at": job.updated_at
     }
+

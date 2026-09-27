@@ -1,17 +1,36 @@
-import os
+from pathlib import Path
 import math
 import random
 import struct
 import wave
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 # Sample rate for generated audio
 SAMPLE_RATE = 22050
 
-def generate_procedural_speech(text: str, voice_profile: str, emotion: str, output_path: str):
+VOICE_RATES = {
+    "light": 175,
+    "soft": 150,
+    "deep": 145,
+    "gruff": 135,
+    "energetic": 185,
+}
+
+SYNTH_CONFIGS = {
+    "deep": {"base_freq": 95.0, "wave_type": "sine", "vibrato_freq": 0.0, "vibrato_amp": 0.0, "speed_modifier": 0.9},
+    "gruff": {"base_freq": 80.0, "wave_type": "square", "vibrato_freq": 3.0, "vibrato_amp": 3.0, "speed_modifier": 0.8},
+    "light": {"base_freq": 270.0, "wave_type": "sine", "vibrato_freq": 5.0, "vibrato_amp": 8.0, "speed_modifier": 1.1},
+    "soft": {"base_freq": 220.0, "wave_type": "triangle", "vibrato_freq": 4.0, "vibrato_amp": 5.0, "speed_modifier": 0.95},
+    "energetic": {"base_freq": 210.0, "wave_type": "sine", "vibrato_freq": 7.0, "vibrato_amp": 15.0, "speed_modifier": 1.25},
+    "female": {"base_freq": 200.0, "wave_type": "sine", "vibrato_freq": 0.0, "vibrato_amp": 0.0, "speed_modifier": 1.0},
+}
+DEFAULT_SYNTH_CONFIG = {"base_freq": 140.0, "wave_type": "sine", "vibrato_freq": 0.0, "vibrato_amp": 0.0, "speed_modifier": 1.0}
+
+
+def generate_procedural_speech(text: str, voice_profile: str, emotion: str, output_path: str) -> None:
     """
     Procedural audio speech generator (chiptune/synthesizer style) with a pyttsx3 spoken speech optimizer.
     Generates spoken audio on supported systems, and falls back to chiptune waves on unsupported systems.
@@ -27,57 +46,28 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
         engine = pyttsx3.init()
         voices = engine.getProperty("voices")
         
-        # Select voice and base rate based on profile to create different character voices
-        selected_voice_id = None
-        base_rate = 160
-        
-        if "female" in voice_profile or "light" in voice_profile or "soft" in voice_profile:
-            # Female Voice (Zira)
-            for v in voices:
-                if "zira" in v.name.lower():
-                    selected_voice_id = v.id
-                    break
-            
-            if "light" in voice_profile:
-                base_rate = 175
-            elif "soft" in voice_profile:
-                base_rate = 150
-            else:
-                base_rate = 160
-        else:
-            # Male Voice (David)
-            for v in voices:
-                if "david" in v.name.lower():
-                    selected_voice_id = v.id
-                    break
-            
-            if "deep" in voice_profile:
-                base_rate = 145
-            elif "gruff" in voice_profile:
-                base_rate = 135
-            elif "energetic" in voice_profile:
-                base_rate = 185
-            else:
-                base_rate = 160
+        is_female_profile = any(token in voice_profile for token in ("female", "light", "soft"))
+        target_voice_name = "zira" if is_female_profile else "david"
+        selected_voice_id = next((v.id for v in voices if target_voice_name in v.name.lower()), None)
+        base_rate = next((rate for key, rate in VOICE_RATES.items() if key in voice_profile), 160)
                 
         if selected_voice_id:
             engine.setProperty("voice", selected_voice_id)
             
-        # Ignore emotional speed/pitch changes as requested (neutral storytelling)
+        # Set rate and volume
         engine.setProperty("rate", base_rate)
         engine.setProperty("volume", 1.0)
         
         # Ensure output directory exists
-        dir_name = os.path.dirname(output_path)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             
         # Save to file
         engine.save_to_file(text, output_path)
         engine.runAndWait()
         
         # Verify the file was generated and is valid (not 0 bytes)
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+        out_file = Path(output_path)
+        if out_file.exists() and out_file.stat().st_size > 100:
             logger.info(f"Successfully generated spoken speech at {output_path}")
             return
         else:
@@ -86,51 +76,13 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
         logger.warning(f"pyttsx3 speech synthesis failed: {exc}. Falling back to chiptune generator.")
     
     # --- Chiptune Fallback Synthesizer (Zero-Dependency) ---
-    # Define distinct base configurations per character voice profile
-    base_freq = 180.0
-    wave_type = "sine"
-    vibrato_freq = 0.0
-    vibrato_amp = 0.0
-    speed_modifier = 1.0
-    
-    if "deep" in voice_profile:
-        base_freq = 95.0
-        wave_type = "sine"
-        speed_modifier = 0.9
-    elif "gruff" in voice_profile:
-        base_freq = 80.0
-        wave_type = "square"
-        vibrato_freq = 3.0
-        vibrato_amp = 3.0
-        speed_modifier = 0.8
-    elif "light" in voice_profile:
-        base_freq = 270.0
-        wave_type = "sine"
-        vibrato_freq = 5.0
-        vibrato_amp = 8.0
-        speed_modifier = 1.1
-    elif "soft" in voice_profile:
-        base_freq = 220.0
-        wave_type = "triangle"
-        vibrato_freq = 4.0
-        vibrato_amp = 5.0
-        speed_modifier = 0.95
-    elif "energetic" in voice_profile:
-        base_freq = 210.0
-        wave_type = "sine"
-        vibrato_freq = 7.0
-        vibrato_amp = 15.0
-        speed_modifier = 1.25
-    elif "female" in voice_profile: # narrator_female
-        base_freq = 200.0
-        wave_type = "sine"
-        speed_modifier = 1.0
-    else: # narrator_male or default
-        base_freq = 140.0
-        wave_type = "sine"
-        speed_modifier = 1.0
+    cfg = next((cfg for key, cfg in SYNTH_CONFIGS.items() if key in voice_profile), DEFAULT_SYNTH_CONFIG)
+    base_freq = cfg["base_freq"]
+    wave_type = cfg["wave_type"]
+    vibrato_freq = cfg["vibrato_freq"]
+    vibrato_amp = cfg["vibrato_amp"]
+    speed_modifier = cfg["speed_modifier"]
         
-    # Ignore emotional modifiers as requested (neutral storytelling)
     pitch_modifier = 1.0
     noise_volume = 0.04
     
@@ -144,31 +96,22 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
     all_frames = []
     t_global = 0.0
     
-    text = text.lower()
-    
-    for char in text:
+    for char in text.lower():
         # Determine sound type and duration
         if char in "aeiouy":
-            dur = vowel_duration
-            sound_type = "vowel"
+            dur, sound_type = vowel_duration, "vowel"
         elif char in "szfvhx":
-            dur = consonant_duration
-            sound_type = "noise"
+            dur, sound_type = consonant_duration, "noise"
         elif char in "ptkbdg":
-            dur = consonant_duration * 0.5
-            sound_type = "plosive"
+            dur, sound_type = consonant_duration * 0.5, "plosive"
         elif char in "mnlrwj":
-            dur = consonant_duration
-            sound_type = "nasal"
+            dur, sound_type = consonant_duration, "nasal"
         elif char == " ":
-            dur = space_duration
-            sound_type = "silence"
+            dur, sound_type = space_duration, "silence"
         elif char in ".,!?;:":
-            dur = punct_duration
-            sound_type = "silence"
+            dur, sound_type = punct_duration, "silence"
         else:
-            dur = char_duration
-            sound_type = "other"
+            dur, sound_type = char_duration, "other"
             
         num_samples = int(SAMPLE_RATE * dur)
         if num_samples <= 0:
@@ -186,26 +129,21 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
             val = 0.0
             
             if sound_type == "vowel":
-                # Rich multi-harmonic synthesis for vowels
                 val = (
                     0.5 * math.sin(2 * math.pi * freq * t_glob) +
                     0.3 * math.sin(2 * math.pi * 2 * freq * t_glob) +
                     0.15 * math.sin(2 * math.pi * 3 * freq * t_glob)
                 )
             elif sound_type == "noise":
-                # Noise for sibilants/fricatives
                 val = 0.35 * (random.random() * 2.0 - 1.0)
             elif sound_type == "plosive":
-                # Plosive pop with rapid exponential decay
                 decay = math.exp(-35.0 * t)
                 val = decay * 0.55 * (random.random() * 2.0 - 1.0)
             elif sound_type == "nasal":
-                # Lower frequency muffled tone
                 val = 0.55 * math.sin(2 * math.pi * (freq * 0.9) * t_glob)
             elif sound_type == "silence":
                 val = 0.0
             else:
-                # Default character synth
                 if wave_type == "square":
                     val = 0.4 if math.sin(2 * math.pi * freq * t_glob) >= 0 else -0.4
                 elif wave_type == "triangle":
@@ -226,16 +164,13 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
                     val *= ((num_samples - i) / fade_len)
                     
             # Convert to 16-bit PCM
-            scaled_val = int(val * 28000)
-            scaled_val = max(-32768, min(32767, scaled_val))
+            scaled_val = max(-32768, min(32767, int(val * 28000)))
             all_frames.append(struct.pack('<h', scaled_val))
             
         t_global += dur
         
     # Write to WAV file
-    dir_name = os.path.dirname(output_path)
-    if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with wave.open(output_path, 'wb') as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
@@ -243,7 +178,7 @@ def generate_procedural_speech(text: str, voice_profile: str, emotion: str, outp
         wav_file.writeframes(b''.join(all_frames))
 
 
-def concatenate_wav_files(input_files: List[str], output_file: str):
+def concatenate_wav_files(input_files: List[str], output_file: str) -> None:
     """Concatenates multiple WAV files with identical parameters into a single WAV file."""
     if not input_files:
         raise ValueError("Input files list is empty")
@@ -253,9 +188,7 @@ def concatenate_wav_files(input_files: List[str], output_file: str):
     with wave.open(input_files[0], 'rb') as first_file:
         params = first_file.getparams()
         
-    out_dir = os.path.dirname(output_file)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     with wave.open(output_file, 'wb') as out_file:
         out_file.setparams(params)
         for file in input_files:
@@ -263,13 +196,18 @@ def concatenate_wav_files(input_files: List[str], output_file: str):
                 out_file.writeframes(in_file.readframes(in_file.getnframes()))
 
 
-def get_voice_profile_for_segment(segment: Dict[str, Any], characters: List[Dict[str, Any]], prev_text: str = "", narrator_voice: str = "warm") -> str:
+def get_voice_profile_for_segment(
+    segment: Dict[str, Any], 
+    characters: List[Dict[str, Any]], 
+    prev_text: str = "", 
+    narrator_voice: str = "warm"
+) -> str:
     """Helper to determine the best voice profile for a text segment."""
     if segment.get("type") == "narration":
         return f"narrator_{narrator_voice}"
         
     text = segment.get("text", "").lower()
-    combined_context = (text + " " + prev_text).lower()
+    combined_context = f"{text} {prev_text}".lower()
     
     # Check if a known character is mentioned in or near this dialogue
     for char in characters:
@@ -278,8 +216,11 @@ def get_voice_profile_for_segment(segment: Dict[str, Any], characters: List[Dict
             return char.get("voice_profile", "character_light")
             
     # Try to find a character profile that isn't the narrator
-    char_profiles = [c.get("voice_profile") for c in characters if c.get("voice_profile") not in ("narrator_warm", "narrator_male", "narrator_female")]
-    if char_profiles:
-        return char_profiles[0]
-        
-    return "character_light"
+    return next(
+        (
+            p for c in characters 
+            if (p := c.get("voice_profile")) and p not in ("narrator_warm", "narrator_male", "narrator_female")
+        ),
+        "character_light"
+    )
+

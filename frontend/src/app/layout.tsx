@@ -26,8 +26,9 @@ export default function RootLayout({
       <html
         lang="en"
         className={`dark ${inter.variable} h-full antialiased`}
+        suppressHydrationWarning
       >
-        <body className="min-h-full flex flex-col">{children}</body>
+        <body className="min-h-full flex flex-col" suppressHydrationWarning>{children}</body>
       </html>
     );
   }
@@ -37,10 +38,12 @@ export default function RootLayout({
       <html
         lang="en"
         className={`dark ${inter.variable} h-full antialiased`}
+        suppressHydrationWarning
       >
-        <body className="min-h-full flex flex-col">{children}</body>
+        <body className="min-h-full flex flex-col" suppressHydrationWarning>{children}</body>
       </html>
     </ClerkProvider>
   );
 }
+
 
